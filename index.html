@@ -56,7 +56,7 @@
   </style>
 </head>
 <body>
-  <!-- (Tu cuerpo con topbar, KPIs, mapa, paneles… sin cambios) -->
+  <!-- (Tu cuerpo tal cual) -->
   <header class="topbar">
     <div class="brand">
       <span class="logo">🌿</span>
@@ -156,7 +156,6 @@
         </div>
       </section>
 
-      <!-- Simulador sin manejo -->
       <div class="card" id="sim-card">
         <div class="card-header">
           <h4>Simular pastoreo (sin manejo)</h4>
@@ -223,7 +222,6 @@
     </aside>
   </main>
 
-  <!-- Modal exclusiones -->
   <div id="exc-modal">
     <div class="backdrop"></div>
     <div class="card">
@@ -236,25 +234,31 @@
     </div>
   </div>
 
-<!-- ORDEN CORRECTO DE SCRIPTS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
-<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- Libs -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
-<!-- Define aquí la URL remota del MOV (Google Sheets publicado como CSV) -->
-<script>
-  // Pega tu URL publicada que termina en output=csv
-  window.PV6_MOV_REMOTE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR_Rp6f-Xdv6RyWXQhY0uV1E5P3PBQpjMJIVrxeRAq4RCYMEzlqWY24Jltqstcp3uV79moaJc63d4cf/pub?gid=0&single=true&output=csv";
-</script>
+  <!-- REGISTRO SW (nuevo) -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw_mov_remote.js?ver=1").then(() => {
+        console.log("[MOV][sw] registrado");
+      }).catch(e => console.warn("[MOV][sw] error registro", e));
+      navigator.serviceWorker.addEventListener("message", (ev) => {
+        const m = ev.data || {};
+        if (m.kind === "MOV_PATCH_OK")  console.log(`[MOV][SW] intercept → remoto OK (${m.rows} filas)`);
+        if (m.kind === "MOV_PATCH_ERR") console.warn("[MOV][SW] intercept error:", m.msg);
+      });
+    }
+  </script>
 
-<!-- Parche remoto: DESPUÉS de PapaParse y ANTES de app.v6.js -->
-<script src="pv6_mov_remote_patch.js?v=1.3"></script>
+  <!-- Parche JS (refuerzo) -->
+  <script src="pv6_mov_remote_patch.js?v=2.0"></script>
 
-<!-- Core y addons -->
-<script src="app.v6.js?v=V6"></script>
-<script src="pv6_m1_addon.js?v=1"></script>
-<script src="pv6_m2_addon.js?v=2.2"></script>
-
-<!-- (Opcional) evita el 404 del favicon -->
-<link rel="icon" href="data:,">
-
+  <!-- App y addons -->
+  <script src="app.v6.js?v=V6"></script>
+  <script src="pv6_m1_addon.js?v=1"></script>
+  <script src="pv6_m2_addon.js?v=2.2"></script>
+</body>
+</html>
