@@ -1,131 +1,67 @@
-/* pv6_mov_remote_patch.js
-   Intercepta SIEMPRE las lecturas de "MOV_GANADO_CARGA_MIX.csv"
-   y las redirige a la URL de Google Sheets publicada como CSV.
-   Muestra en consola: "[MOV][patch] intercept → remoto OK (N filas)"
-   y en la pestaña Red verás la solicitud apuntando a la URL remota.
-*/
+/* pv6_mov_remote_patch.js (reforzado) */
 (function () {
   const TARGET_NAME = "MOV_GANADO_CARGA_MIX.csv";
   const REMOTE_URL_BASE = "https://docs.google.com/spreadsheets/d/e/2PACX-1vR_Rp6f-Xdv6RyWXQhY0uV1E5P3PBQpjMJIVrxeRAq4RCYMEzlqWY24Jltqstcp3uV79moaJc63d4cf/pub?gid=0&single=true&output=csv";
-
-  // Cache-busting para evitar respuestas enramadas del navegador
-  const withCacheBust = (url) => {
-    const u = new URL(url);
-    u.searchParams.set("_ts", Date.now().toString());
-    return u.toString();
+  const withBust = (u) => `${u}${u.includes("?") ? "&" : "?"}_ts=${Date.now()}`;
+  const isTarget = (u) => {
+    try { const x = new URL(u, location.href); return x.pathname.endsWith("/"+TARGET_NAME) || x.pathname===TARGET_NAME; }
+    catch { return String(u).includes(TARGET_NAME); }
   };
 
-  const isTarget = (url) => {
-    try {
-      // Soporta rutas relativas o absolutas
-      const u = new URL(url, location.href);
-      return u.pathname.endsWith("/" + TARGET_NAME) || u.pathname === TARGET_NAME || u.href.endsWith("/" + TARGET_NAME);
-    } catch {
-      // Si no es URL válida (p.ej. solo nombre), comparar por inclusión
-      return String(url).includes(TARGET_NAME);
-    }
-  };
+  // Log desde mensajes del Service Worker
+  navigator.serviceWorker && navigator.serviceWorker.addEventListener("message", (ev) => {
+    const m = ev.data || {};
+    if (m.kind === "MOV_PATCH_OK")  console.log(`[MOV][SW] intercept → remoto OK (${m.rows} filas)`);
+    if (m.kind === "MOV_PATCH_ERR") console.warn("[MOV][SW] intercept error:", m.msg);
+  });
 
-  const countCsvRows = (csvText) => {
-    // Cuenta filas de datos (excluyendo encabezado y líneas vacías)
-    if (!csvText) return 0;
-    // Usa Papa si está disponible para mayor robustez; si no, fallback simple
-    try {
-      if (window.Papa && window.Papa.parse) {
-        const parsed = Papa.parse(csvText, { skipEmptyLines: true });
-        const rows = Array.isArray(parsed.data) ? parsed.data.length : 0;
-        return rows > 0 ? (rows - 1) : 0; // quitar encabezado
-      }
-    } catch {}
-    // Fallback: split por líneas
-    const lines = csvText.split(/\r?\n/).filter(Boolean);
-    return lines.length > 1 ? (lines.length - 1) : 0;
-  };
-
-  // ---- Patch fetch ----
+  // fetch
   const _fetch = window.fetch;
-  if (typeof _fetch === "function") {
-    window.fetch = async function (input, init) {
-      try {
-        let url = (typeof input === "string") ? input : (input && input.url);
-        if (url && isTarget(url)) {
-          const remote = withCacheBust(REMOTE_URL_BASE);
-          const req = (typeof input === "string") ? remote : new Request(remote, input);
-          const res = await _fetch(req, init);
-
-          // Clona y cuenta filas para log
-          const clone = res.clone();
-          const text = await clone.text();
-          const n = countCsvRows(text);
-          console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
-
-          // Devuelve respuesta original (no el clone)
-          return new Response(text, {
-            status: res.status,
-            statusText: res.statusText,
-            headers: res.headers
-          });
-        }
-      } catch (e) {
-        console.warn("[MOV][patch] fetch intercept warning:", e);
+  window.fetch = async function (input, init) {
+    try {
+      const url = typeof input === "string" ? input : input && input.url;
+      if (url && isTarget(url)) {
+        const res = await _fetch(withBust(REMOTE_URL_BASE), init);
+        const txt = await res.clone().text();
+        const n = Math.max(0, (txt.split(/\r?\n/).filter(Boolean).length - 1));
+        console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
+        return new Response(txt, { status: res.status, statusText: res.statusText, headers: res.headers });
       }
-      return _fetch(input, init);
-    };
-  }
+    } catch (e) {}
+    return _fetch(input, init);
+  };
 
-  // ---- Patch XMLHttpRequest (para Papa.parse con download:true) ----
+  // XHR
   const XHR = window.XMLHttpRequest;
   if (XHR && XHR.prototype) {
-    const _open = XHR.prototype.open;
-    const _send = XHR.prototype.send;
-
-    XHR.prototype.open = function (method, url, async, user, password) {
-      this.__mov_is_target = isTarget(url);
-      this.__mov_original_url = url;
-      this.__mov_replaced_url = this.__mov_is_target ? withCacheBust(REMOTE_URL_BASE) : url;
-      return _open.call(this, method, this.__mov_replaced_url, async, user, password);
+    const _open = XHR.prototype.open, _send = XHR.prototype.send;
+    XHR.prototype.open = function (m, url, a, u, p) {
+      this.__mov = isTarget(url);
+      return _open.call(this, m, this.__mov ? withBust(REMOTE_URL_BASE) : url, a, u, p);
     };
-
-    XHR.prototype.send = function (body) {
-      if (this.__mov_is_target) {
-        const onLoad = () => {
-          try {
-            const text = this.responseText || "";
-            const n = countCsvRows(text);
-            console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
-          } catch (e) {
-            console.warn("[MOV][patch] XHR count warning:", e);
-          }
-          this.removeEventListener("load", onLoad);
-        };
-        this.addEventListener("load", onLoad);
-      }
-      return _send.call(this, body);
+    XHR.prototype.send = function (b) {
+      if (this.__mov) this.addEventListener("load", () => {
+        const t = this.responseText || ""; const n = Math.max(0, t.split(/\r?\n/).filter(Boolean).length - 1);
+        console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
+      });
+      return _send.call(this, b);
     };
   }
 
-  // ---- Hardening: intercepta también Papa.parse(url, {download:true}) antes de crear XHR (fallback) ----
-  if (window.Papa && typeof window.Papa.parse === "function") {
-    const _papaparse = window.Papa.parse.bind(window.Papa);
-    window.Papa.parse = function (input, config = {}) {
-      try {
-        if (typeof input === "string" && (config && config.download === true) && isTarget(input)) {
-          const remote = withCacheBust(REMOTE_URL_BASE);
-          const wrappedConfig = Object.assign({}, config);
-          const _complete = wrappedConfig.complete;
-          wrappedConfig.complete = function (results, file) {
-            try {
-              const n = (results && Array.isArray(results.data)) ? Math.max(0, results.data.length - 1) : 0;
-              console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
-            } catch {}
-            if (typeof _complete === "function") _complete(results, file);
-          };
-          return _papaparse(remote, wrappedConfig);
-        }
-      } catch (e) {
-        console.warn("[MOV][patch] Papa.parse intercept warning:", e);
+  // Papa.parse(url,{download:true})
+  if (window.Papa && typeof Papa.parse === "function") {
+    const _pp = Papa.parse.bind(Papa);
+    Papa.parse = function (input, cfg = {}) {
+      if (typeof input === "string" && cfg && cfg.download === true && isTarget(input)) {
+        const wcfg = { ...cfg };
+        const _complete = wcfg.complete;
+        wcfg.complete = (r, f) => { try {
+          const n = Array.isArray(r?.data) ? Math.max(0, r.data.length - 1) : 0;
+          console.log(`[MOV][patch] intercept → remoto OK (${n} filas)`);
+        } catch {} if (typeof _complete === "function") _complete(r, f); };
+        return _pp(withBust(REMOTE_URL_BASE), wcfg);
       }
-      return _papaparse(input, config);
+      return _pp(input, cfg);
     };
   }
 
