@@ -1,89 +1,88 @@
-/* PV6 — parche remoto de movimientos (GitHub Pages/Netlify friendly)
-   - Intercepta Papa.parse tanto en firma (url, cfg) como en firma objeto {download:true, url:...}
-   - Registra logs de armado, intercept y resultados
+/* PV6 — parche remoto de movimientos (GitHub Pages / Netlify compatible)
+   Intercepta la carga de MOV_GANADO_CARGA_MIX.csv y la redirige a una URL remota (Google Sheets publicado como CSV).
+   Requisitos:
+   - Cargar DESPUÉS de papaparse.min.js y ANTES de app.v6.js en index.html
+   - Definir window.PV6_MOV_REMOTE_URL (opcional) con tu URL publicada (termina en output=csv)
 */
 (function () {
-  // 1) Lee la URL desde window (si la definiste en index.html) o usa la de aquí.
-  const URL_REMOTA = (window.PV6_MOV_REMOTE_URL || 'https://docs.google.com/spreadsheets/d/e/2PACX-1vR_Rp6f-Xdv6RyWXQhY0uV1E5P3PBQpjMJIVrxeRAq4RCYMEzlqWY24Jltqstcp3uV79moaJc63d4cf/pub?gid=0&single=true&output=csv').trim();
-  const RE_MOV = /MOV_GANADO_CARGA_MIX\.csv(\?.*)?$/i;
+  // 1) Toma la URL remota desde window o usa la de respaldo si quieres dejar una por defecto
+  const URL_REMOTA = (window.PV6_MOV_REMOTE_URL || '').trim();
 
-  let armado = false;
-  let intentos = 0;
+  // 2) Coincide exactamente con el archivo local de movimientos
+  const RE_MOV = /\/?MOV_GANADO_CARGA_MIX\.csv(\?.*)?$/i;
+
+  // 3) Pequeño “espera & arma” por si Papa aún no está disponible
   const ESPERA_MS = 150;
   const MAX_INTENTOS = 40;
+  let intentos = 0;
+  let armado = false;
 
-  function isMov(u) {
-    return typeof u === 'string' && RE_MOV.test(u);
-  }
-  function toRemote(u) {
-    const sep = URL_REMOTA.includes('?') ? '&' : '?';
-    return URL_REMOTA + sep + '_ts=' + Date.now();
+  function ts(url) {
+    const sep = url.includes('?') ? '&' : '?';
+    return url + sep + '_ts=' + Date.now();
   }
 
-  function armarParche() {
-    if (!window.Papa || !Papa.parse) {
-      if (!armado && intentos === 0) console.warn('[MOV][patch] armado (esperando Papa)');
-      if (++intentos < MAX_INTENTOS) return setTimeout(armarParche, ESPERA_MS);
-      console.warn('[MOV][patch] Papa no apareció; no se aplicó parche');
+  function armar() {
+    if (armado) return;
+    if (!window.Papa || !window.Papa.parse) {
+      if (intentos === 0) console.warn('[MOV][patch] armado (esperando Papa)');
+      if (++intentos < MAX_INTENTOS) return setTimeout(armar, ESPERA_MS);
+      console.warn('[MOV][patch] Papa no apareció; salto parche');
       return;
     }
 
-    const original = Papa.parse;
+    // Guardamos el Papa.parse original
+    const parseOrig = Papa.parse;
 
+    // Interceptamos tanto la firma (url, cfg) como la firma de objeto { download:true, url:... }
     Papa.parse = function (arg1, arg2) {
-      // Firma 1: Papa.parse(url, cfg)
-      if (typeof arg1 === 'string' && isMov(arg1) && typeof window.fetch !== 'undefined') {
-        const remoto = toRemote(arg1);
-        console.warn('[MOV][patch] intercept ->', remoto);
-        const cfg = arg2 && typeof arg2 === 'object' ? arg2 : {};
-        const onComplete = cfg.complete;
-        const onError = cfg.error;
-
-        const cfg1 = Object.assign({}, cfg, {
-          complete: function (res, file) {
-            console.warn('[MOV][patch] remoto OK (firma url,cfg)');
-            if (typeof onComplete === 'function') onComplete(res, file);
-          },
-          error: function (err, file) {
-            console.warn('[MOV][patch] remoto falló (firma url,cfg), fallback local');
-            original.call(Papa, arg1, arg2); // vuelve a local
-            if (typeof onError === 'function') onError(err, file);
-          }
-        });
-        return original.call(Papa, remoto, cfg1);
+      // Caso 1: Papa.parse(urlString, config)
+      if (typeof arg1 === 'string') {
+        let url = arg1;
+        if (RE_MOV.test(url) && URL_REMOTA) {
+          console.warn('[MOV][patch] intercept ->', url, '→', URL_REMOTA);
+          const cfg = Object.assign({}, arg2, {
+            complete: wrapComplete(arg2 && arg2.complete, url),
+            error: wrapError(arg2 && arg2.error, url)
+          });
+          return parseOrig.call(Papa, ts(URL_REMOTA), cfg);
+        }
+        return parseOrig.call(Papa, url, arg2);
       }
 
-      // Firma 2: Papa.parse({ download:true, url:'...' }, cfg?)
-      if (arg1 && typeof arg1 === 'object' && arg1.download && typeof arg1.url === 'string' && isMov(arg1.url)) {
-        const remoto = toRemote(arg1.url);
-        console.warn('[MOV][patch] intercept (obj) ->', remoto);
-
-        const obj = Object.assign({}, arg1, { url: remoto });
-        const cfg = arg2 && typeof arg2 === 'object' ? arg2 : {};
-        const onComplete = cfg.complete;
-        const onError = cfg.error;
-
-        const cfg1 = Object.assign({}, cfg, {
-          complete: function (res, file) {
-            console.warn('[MOV][patch] remoto OK (firma objeto)');
-            if (typeof onComplete === 'function') onComplete(res, file);
-          },
-          error: function (err, file) {
-            console.warn('[MOV][patch] remoto falló (obj), fallback local');
-            original.call(Papa, arg1, arg2); // vuelve a local
-            if (typeof onError === 'function') onError(err, file);
-          }
-        });
-        return original.call(Papa, obj, cfg1);
+      // Caso 2: Papa.parse({ download:true, url:... , ... })
+      if (arg1 && typeof arg1 === 'object' && arg1.download && typeof arg1.url === 'string') {
+        const obj = Object.assign({}, arg1);
+        if (RE_MOV.test(obj.url) && URL_REMOTA) {
+          console.warn('[MOV][patch] intercept ->', obj.url, '→', URL_REMOTA);
+          obj.url = ts(URL_REMOTA);
+          obj.complete = wrapComplete(obj.complete, arg1.url);
+          obj.error = wrapError(obj.error, arg1.url);
+          return parseOrig.call(Papa, obj);
+        }
       }
 
-      // Otros casos → comportamiento original
-      return original.apply(Papa, arguments);
+      // Cualquier otro caso, seguir normal
+      return parseOrig.apply(Papa, arguments);
     };
 
     armado = true;
     console.warn('[MOV][patch] armado OK');
   }
 
-  armarParche();
+  function wrapComplete(cb, origen) {
+    return function (res, file) {
+      console.warn('[MOV][patch] remoto OK ←', origen, res && res.data ? `(rows: ${res.data.length})` : '');
+      if (typeof cb === 'function') cb(res, file);
+    };
+  }
+
+  function wrapError(cb, origen) {
+    return function (err, file) {
+      console.warn('[MOV][patch] remoto falló; fallback a local ←', origen, err);
+      if (typeof cb === 'function') cb(err, file);
+    };
+  }
+
+  armar();
 })();
