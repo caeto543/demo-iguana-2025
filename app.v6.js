@@ -438,6 +438,76 @@ function normalizeRow(r){
 
   renderAll();
 
+  /* ====== BRIDGE PARA ADDONS (M2.2) ======
+     PÉGALO INMEDIATAMENTE DESPUÉS DE: renderAll();  */
+  try {
+    // Espacio global PV6
+    window.PV6 = window.PV6 || {};
+    PV6.state = state;
+
+    // ---- Datos que el addon necesita ----
+    PV6.data = PV6.data || {};
+    PV6.data.geojson = gj;
+
+    // Mapa: potrero -> { fechaISO: kgms_7d (o raw si falta) }
+    (function buildKg7(){
+      const out = Object.create(null);
+      for (const [nm, arr] of series) {
+        const byDate = Object.create(null);
+        for (const r of arr) {
+          if (!r || !r.date) continue;
+          byDate[r.date] = (r.kgms_7d != null ? r.kgms_7d : (r.kgms_raw ?? null));
+        }
+        out[nm] = byDate;
+      }
+      PV6.data.kgms7dByPot = out;
+    })();
+
+    // Áreas (objeto plano)
+    PV6.data.areaHaByPot = Object.fromEntries(AREAS);
+
+    // Movimientos en filas limpias
+    PV6.data.movRows = (function(){ 
+      const rows = [];
+      for (const [nm, arr] of moves) {
+        for (const r of arr) rows.push({ name_canon:nm, date:r.date, UA_total:r.UA_total, PV_total_kg:r.PV_total_kg, N_total:r.N_total, DSL:r.DSL, ocupado:r.ocupado });
+      }
+      return rows.sort((a,b)=> a.date.localeCompare(b.date));
+    })();
+
+    // ---- API mínima de UI que usa el addon ----
+    PV6.ui = PV6.ui || {};
+    PV6.ui.refreshMap = renderMap;
+    PV6.ui.refreshRanking = function(/* uaOverride opcional */){ renderRanking(); renderPastoreoChips(); };
+    PV6.ui.onKpiChange = function(/* { uaTot } */){}; // opcional
+    PV6.ui.getSuggestedDests = function(dateISO){
+      const rs = computeRanking(dateISO);
+      return rs.slice(0, 8).map(r => r.nm);
+    };
+
+    // Cálculo de días con override de UA
+    PV6.computeDays = function(pot, dateISO, uaOverride){
+      const dEnd = parseDate(dateISO);
+      const area = AREAS.get(pot) || 0;
+      const arr  = series.get(pot) || [];
+      let kg = (state.fuente==='raw') ? lastOnOrBefore(arr,dEnd,'kgms_raw') : lastOnOrBefore(arr,dEnd,'kgms_7d');
+      if (kg==null) kg = lastOnOrBefore(arr,dEnd,'kgms_7d');
+      const fnd = FND.has(pot) ? FND.get(pot) : null;
+      const { D0, Dadj } = computeDays(kg, area, (uaOverride||0), fnd);
+      return { d0: D0||0, dadj: Dadj||0 };
+    };
+
+    // Hook: datos listos → arrancar M2.2
+    PV6.onDataReady = function(){
+      if (typeof window.__PV6_M2_INIT__ === "function") window.__PV6_M2_INIT__();
+    };
+    PV6.onDataReady();
+
+  } catch(e) {
+    console.warn("[M2.2] bridge init warning:", e);
+  }
+  /* ====== FIN BRIDGE M2.2 ====== */
+
 }catch(err){ console.error('Error en init V6', err); }})();
 
 /* ===== selección / breaks ===== */
