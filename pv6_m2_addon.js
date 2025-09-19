@@ -1,11 +1,10 @@
-/* pv6_m2_addon.js — M2.2 hotfix estable (con UI autoinyectada)
-   - Crea la sección “Pastoreo con manejo” si no existe
-   - Origen: estrictamente ocupados (autocorrige fecha si no hay)
-   - Destino: “— Ningún potrero (salida de finca) —” + todos los potreros (ocupados marcados)
-   - Recalcular sugeridos usa UA/PV/N ingresada (override) y calcula D0/Dadj
-   - Formulario inteligente: UA ↔ PV/N mutuamente excluyentes + “Limpiar”
-   - UA finca/KPIs refrescados tras cada operación
-   - Autoextiende end si hay MOV más nuevo que biomasa
+/* pv6_m2_addon.js — M2.2 hotfix estable (FIX padres+ocupados+sugeridos UA)
+   - Origen: SOLO padres ocupados a la fecha (sin hijos “_z_”); autocorrección de fecha si no hay ocupados
+   - Destino: “— Ningún potrero (salida de finca) —”, luego “Destinos sugeridos” (reordenados por UA/PV/N ingresada),
+              y “Todos los potreros” (solo padres). Ocupados marcados correctamente.
+   - Recalcular sugeridos: usa UA/PV/N para D0/Dadj y reordenar
+   - Formulario UA↔PV/N mutuamente excluyentes + “Limpiar”
+   - KPI & mapa/ranking se refrescan tras cada operación
 */
 (function () {
   const M2 = {
@@ -20,13 +19,12 @@
       dateStart:null, dateEnd:null,
       uso:60, auKg:10,
       overrideUA:null, overridePV:null, overrideN:null,
-      uaIndex:null, allPots:[], occToday:null
+      uaIndex:null, allParents:[],   // <— solo PADRES
     },
 
     /* ========== UI: crear si falta ========== */
     ensureUI() {
       if (document.getElementById("pv6-manejo")) return;
-      // dónde insertarlo: debajo del card de simulación si existe; si no, al final de .side
       const sim = document.getElementById("sim-card");
       const side = document.querySelector(".side") || document.body;
 
@@ -62,14 +60,11 @@
       if (sim && sim.parentNode) sim.parentNode.insertBefore(card, sim.nextSibling);
       else side.appendChild(card);
 
-      // estilos mínimos si no existen
       if (!document.getElementById("pv6-manejo-css")) {
         const st = document.createElement("style");
         st.id = "pv6-manejo-css";
-        st.textContent = `
-          #pv6-manejo label{display:flex;flex-direction:column;font-size:12px;color:#475569}
-          #pv6-manejo input, #pv6-manejo select{padding:6px 8px;border:1px solid #d0d7e2;border-radius:8px}
-        `;
+        st.textContent = `#pv6-manejo label{display:flex;flex-direction:column;font-size:12px;color:#475569}
+                           #pv6-manejo input,#pv6-manejo select{padding:6px 8px;border:1px solid #d0d7e2;border-radius:8px}`;
         document.head.appendChild(st);
       }
     },
@@ -78,9 +73,10 @@
     norm(s){ return String(s??"").trim().toLowerCase(); },
     toISO(d){ return d instanceof Date ? d.toISOString().slice(0,10) : String(d??"").slice(0,10); },
     num(x){ if(typeof x==="number") return x; if(x==null) return 0; const s=String(x).replace(/\./g,"").replace(/,/g,"."); const v=parseFloat(s); return isFinite(v)?v:0; },
+    isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
     findCol(row, names){ for(const k of Object.keys(row)){ if(names.includes(this.norm(k))) return k; } return null; },
 
-    /* ========== Índice UA por potrero/fecha ========== */
+    /* ========== Índice UA (por potrero/fecha) ========== */
     buildUAIndex(mrows){
       const out={}; if(!Array.isArray(mrows)||!mrows.length) return out;
       const sample=mrows.find(r=>r&&Object.keys(r).length); if(!sample) return out;
@@ -100,20 +96,32 @@
       return best;
     },
 
-    /* ========== Ocupados estrictos y listas ========== */
-    setAllPots(list){ this.state.allPots = Array.from(new Set(list.filter(Boolean))).sort((a,b)=>a.localeCompare(b)); },
-    computeOccForDate(dateISO){ const occ=new Set(); for(const p of this.state.allPots){ const ua=this.lastUAonOrBefore(this.state.uaIndex,p,dateISO); if(ua>0) occ.add(p); } return occ; },
-    collectAllDates(){ const S=new Set(); const idx=this.state.uaIndex||{}; for(const p in idx) for(const d in idx[p]) S.add(d); return Array.from(S).sort(); },
-
-    /* ========== Auto-extender end si hay MOV + nuevos ========== */
-    autoExtendEndIfNeeded(maxMovDateISO){
-      try{
-        if(maxMovDateISO && maxMovDateISO>this.state.dateEnd){
-          this.state.dateEnd = maxMovDateISO;
-          const el=document.getElementById("date-end"); if(el) el.value=maxMovDateISO;
-          console.log("[M2.2] end auto-extend →", maxMovDateISO);
-        }
-      }catch{}
+    /* ========== Padres & ocupados ========== */
+    buildParentsFromGeo(){
+      const feat = window.PV6?.data?.geojson?.features || [];
+      const S = new Set();
+      for (const f of feat){
+        const nm = f?.properties?.name_canon || f?.properties?.__canon || f?.properties?.name || f?.properties?.padre;
+        if (this.isParentName(nm)) S.add(String(nm).trim());
+      }
+      // (fallback) si no hay geo, mirar claves de biomasa y filtrar _z_
+      if (!S.size && window.PV6?.data?.kgms7dByPot){
+        for (const k of Object.keys(window.PV6.data.kgms7dByPot)){ if (this.isParentName(k)) S.add(k); }
+      }
+      this.state.allParents = Array.from(S).sort((a,b)=>a.localeCompare(b));
+    },
+    computeOccParents(dateISO){
+      const occ = new Set();
+      for (const p of this.state.allParents){
+        const u = this.lastUAonOrBefore(this.state.uaIndex, p, dateISO);
+        if (u > 0) occ.add(p);
+      }
+      return occ;
+    },
+    collectAllMoveDates(){
+      const S=new Set(); const idx=this.state.uaIndex||{};
+      for(const p in idx) for(const d in idx[p]) S.add(d);
+      return Array.from(S).sort();
     },
 
     /* ========== Días con override UA ========== */
@@ -123,7 +131,7 @@
           return PV6.computeDays(pot, this.state.dateEnd, uaOverride);
         }
       }catch{}
-      // fallback
+      // fallback simple
       const kgms = (window.PV6?.data?.kgms7dByPot?.[pot]?.[this.state.dateEnd]) ?? 2000;
       const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
       const of = kgms * area * (this.state.uso/100);
@@ -132,7 +140,28 @@
       return { d0:d, dadj: Math.max(0, d*0.85) };
     },
 
-    /* ========== Formulario inteligente + acciones ========== */
+    /* ========== Sugeridos (ordenados por UA override si la hay) ========== */
+    getSuggestedParents(uaOverride){
+      // base: ranking actual (si está disponible), limitado a padres
+      let base = [];
+      try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd) : []); }catch{}
+      const namesRanked = base.map(r=>r?.nm).filter(n=>this.isParentName(n));
+
+      // si no hay ranking, usar todos los padres
+      let cand = namesRanked.length ? namesRanked : [...this.state.allParents];
+
+      // reordenar por Dadj con UA override si está definida
+      if (uaOverride && uaOverride>0){
+        const scored = cand.map(p=>{
+          const d = this.computeDaysSafe(p, uaOverride);
+          return { p, score: (d?.dadj ?? 0) };
+        }).sort((a,b)=> (b.score - a.score));
+        cand = scored.map(x=>x.p);
+      }
+      return cand.slice(0, 10);
+    },
+
+    /* ========== Formulario + acciones ========== */
     wireForm(){
       const elUA = document.getElementById("mov-ua");
       const elPV = document.getElementById("mov-pv");
@@ -151,57 +180,78 @@
       };
       ["input","change"].forEach(evt=>{ elUA?.addEventListener(evt,lock); elPV?.addEventListener(evt,lock); elN?.addEventListener(evt,lock); });
 
-      elClr?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=this.state.overridePV=this.state.overrideN=null; });
+      elClr?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=this.state.overridePV=this.state.overrideN=null; this.refreshDestSelector(); });
 
-      elRec?.addEventListener("click", ()=>{
-        const ua = this.state.overrideUA ?? 0;
-        if (window.PV6?.ui?.recalcSuggestions) {
-          window.PV6.ui.recalcSuggestions(ua, (pot)=> this.computeDaysSafe(pot, ua));
-        }
-        console.log("[M2.2] sugeridos recalculados con UA=", ua);
-      });
+      elRec?.addEventListener("click", ()=>{ this.refreshDestSelector(); console.log("[M2.2] sugeridos recalculados con UA=", this.state.overrideUA??0); });
 
       elDo?.addEventListener("click", ()=> this.applyMoveOrEnter("move"));
       elIn?.addEventListener("click", ()=> this.applyMoveOrEnter("enter"));
     },
 
-    refreshOriginDestSelectors(){
-      const dateISO=this.state.dateEnd;
+    refreshOriginSelector(){
       const selOri=document.getElementById("mov-origin");
-      const selDes=document.getElementById("mov-dest");
+      if (!selOri) return;
 
-      // ORIGEN: solo ocupados (autocorrección si no hay)
-      if (selOri){
-        selOri.innerHTML="";
-        const occ=this.computeOccForDate(dateISO);
-        const occList=Array.from(occ).sort((a,b)=>a.localeCompare(b));
-        if (!occList.length){
-          const allDates=this.collectAllDates();
-          for(let i=allDates.length-1;i>=0;i--){
-            const d=allDates[i], occ2=this.computeOccForDate(d);
-            if (occ2.size>0){ this.state.dateEnd=d; const el=document.getElementById("date-end"); if(el) el.value=d; console.log("[M2.2] Ajuste de fecha (sin ocupados) →", d); return this.refreshOriginDestSelectors(); }
+      selOri.innerHTML = "";
+      const dateISO = this.state.dateEnd;
+      const occ = this.computeOccParents(dateISO);
+      const occList = Array.from(occ).sort((a,b)=>a.localeCompare(b));
+
+      if (!occList.length){
+        // autocorrección de fecha hacia atrás
+        const allDates=this.collectAllMoveDates();
+        for(let i=allDates.length-1;i>=0;i--){
+          const d=allDates[i];
+          const occ2=this.computeOccParents(d);
+          if (occ2.size>0){
+            this.state.dateEnd = d;
+            const el=document.getElementById("date-end"); if(el) el.value = d;
+            console.log("[M2.2] Ajuste de fecha (sin ocupados) →", d);
+            return this.refreshOriginSelector();
           }
-        } else {
-          for(const p of occList){ const opt=document.createElement("option"); opt.value=p; opt.textContent=p; selOri.appendChild(opt); }
+        }
+      } else {
+        for (const p of occList){
+          const opt=document.createElement("option");
+          opt.value=p; opt.textContent=p;
+          selOri.appendChild(opt);
         }
       }
+    },
 
-      // DESTINO: salida de finca + sugeridos + todos
-      if (selDes){
-        selDes.innerHTML="";
-        const opt0=document.createElement("option"); opt0.value="__OUT__"; opt0.textContent="— Ningún potrero (salida de finca) —"; selDes.appendChild(opt0);
+    refreshDestSelector(){
+      const selDes=document.getElementById("mov-dest");
+      if (!selDes) return;
 
-        const sugg = (window.PV6?.ui?.getSuggestedDests ? window.PV6.ui.getSuggestedDests(this.state.dateEnd) : []);
-        if (sugg && sugg.length){
-          const grp=document.createElement("optgroup"); grp.label="Destinos sugeridos";
-          for(const p of sugg){ const op=document.createElement("option"); op.value=p; op.textContent=p; grp.appendChild(op); }
-          selDes.appendChild(grp);
-        }
-        const grp2=document.createElement("optgroup"); grp2.label="Todos los potreros";
-        const occ = this.computeOccForDate(this.state.dateEnd);
-        for (const p of this.state.allPots){ const op=document.createElement("option"); op.value=p; op.textContent=occ.has(p)?`${p} (ocupado)`:p; grp2.appendChild(op); }
-        selDes.appendChild(grp2);
+      selDes.innerHTML = "";
+
+      // Salida de finca
+      const opt0=document.createElement("option");
+      opt0.value="__OUT__";
+      opt0.textContent="— Ningún potrero (salida de finca) —";
+      selDes.appendChild(opt0);
+
+      // Sugeridos (ordenados, usando UA override si la hay)
+      const ua = this.state.overrideUA ?? 0;
+      const sug = this.getSuggestedParents(ua);
+      if (sug.length){
+        const grp=document.createElement("optgroup");
+        grp.label="Destinos sugeridos";
+        sug.forEach(p=>{ const op=document.createElement("option"); op.value=p; op.textContent=p; grp.appendChild(op); });
+        selDes.appendChild(grp);
       }
+
+      // Todos los padres, marcando ocupados
+      const grp2=document.createElement("optgroup");
+      grp2.label="Todos los potreros";
+      const occ = this.computeOccParents(this.state.dateEnd);
+      for (const p of this.state.allParents){
+        const op=document.createElement("option");
+        op.value=p;
+        op.textContent = occ.has(p) ? `${p} (ocupado)` : p;
+        grp2.appendChild(op);
+      }
+      selDes.appendChild(grp2);
     },
 
     applyMoveOrEnter(kind){
@@ -234,27 +284,28 @@
       }
     },
     applyIngress(dst, ua){
-      const d=this.state.dateEnd; this.addMovRow(d,dst, Math.max(0,ua)); this.recalcAfterChange(); console.log(`[M2.2] Ingresar → ${ua} UA a ${dst} (${d})`);
+      const d=this.state.dateEnd; this.addMovRow(d,dst, Math.max(0,ua)); this.afterChange(); console.log(`[M2.2] Ingresar → ${ua} UA a ${dst} (${d})`);
     },
     applyExit(src, ua){
       const d=this.state.dateEnd; const cur=this.lastUAonOrBefore(this.state.uaIndex,src,d); const take=Math.min(cur, ua);
-      this.addMovRow(d,src, -take); this.recalcAfterChange(); console.log(`[M2.2] Salida de finca ← ${take} UA desde ${src} (${d})`);
+      this.addMovRow(d,src, -take); this.afterChange(); console.log(`[M2.2] Salida de finca ← ${take} UA desde ${src} (${d})`);
     },
     applyMove(src,dst,ua){
       const d=this.state.dateEnd; const cur=this.lastUAonOrBefore(this.state.uaIndex,src,d); const take=Math.min(cur, ua);
       if (take<=0) return alert("No hay UA suficientes en el origen para mover.");
-      this.addMovRow(d,src,-take); this.addMovRow(d,dst,+take); this.recalcAfterChange();
+      this.addMovRow(d,src,-take); this.addMovRow(d,dst,+take); this.afterChange();
       console.log(`[M2.2] Mover ${take} UA: ${src} → ${dst} (${d})`);
     },
 
     recalcKPI(){
       const d=this.state.dateEnd; let uaTot=0;
-      for (const p of this.state.allPots){ const u=this.lastUAonOrBefore(this.state.uaIndex,p,d); if(u>0) uaTot+=u; }
+      for (const p of this.state.allParents){ const u=this.lastUAonOrBefore(this.state.uaIndex,p,d); if(u>0) uaTot+=u; }
       const el=document.getElementById("kpi-ua-finca"); if (el) el.textContent = new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(uaTot);
       if (window.PV6?.ui?.onKpiChange) window.PV6.ui.onKpiChange({ uaTot });
     },
-    recalcAfterChange(){
-      this.refreshOriginDestSelectors();
+    afterChange(){
+      this.refreshOriginSelector();
+      this.refreshDestSelector();
       this.recalcKPI();
       if (window.PV6?.ui?.refreshMap) window.PV6.ui.refreshMap();
       if (window.PV6?.ui?.refreshRanking) window.PV6.ui.refreshRanking(this.state.overrideUA ?? null);
@@ -268,45 +319,47 @@
       this.state.dateStart = (window.PV6?.state?.start) || document.getElementById("date-start")?.value || "2025-01-01";
       this.state.dateEnd   = (window.PV6?.state?.end)   || document.getElementById("date-end")?.value   || "2025-12-31";
       this.state.uso       = +((window.PV6?.state?.coefUso) ?? this.state.uso);
-      // auKg para convertir PV→UA (usa PV6.state.consumo? No: PV6.state.auKg si existe, si no default 10)
       this.state.auKg      = +((window.PV6?.state?.auKg) ?? this.state.auKg);
 
-      // fuentes para listas
-      const pots = new Set();
-      try{ (window.PV6?.data?.geojson?.features||[]).forEach(f=>pots.add(f?.properties?.name_canon||f?.properties?.name||f?.properties?.padre)); }catch{}
-      try{ Object.keys(window.PV6?.data?.kgms7dByPot||{}).forEach(p=>pots.add(p)); }catch{}
-      this.setAllPots(Array.from(pots));
+      // construir lista de PADRES desde geojson (sin _z_)
+      this.buildParentsFromGeo();
 
       // índice UA
       const movRows = window.PV6?.data?.movRows || [];
       this.state.uaIndex = this.buildUAIndex(movRows);
 
       // auto-extender end con última fecha de MOV
-      const allDates=this.collectAllDates();
-      if (allDates.length) this.autoExtendEndIfNeeded(allDates[allDates.length-1]);
+      const allDates=this.collectAllMoveDates();
+      if (allDates.length){
+        const maxD = allDates[allDates.length-1];
+        if (maxD > this.state.dateEnd){
+          this.state.dateEnd = maxD;
+          const el=document.getElementById("date-end"); if (el) el.value = maxD;
+          console.log("[M2.2] end auto-extend →", maxD);
+        }
+      }
 
       // armar selects + form
-      this.refreshOriginDestSelectors();
+      this.refreshOriginSelector();
+      this.refreshDestSelector();
       this.wireForm();
 
       console.log("[M2.2] inicializado");
     }
   };
 
-  // Boot cuando esté listo el DOM y los datos
+  // Boot cuando esté listo el DOM y por si el app no invoca onDataReady
   const boot = () => {
     if (document.readyState === "loading"){
       document.addEventListener("DOMContentLoaded", boot, {once:true}); return;
     }
     if (window.PV6 && typeof PV6.onDataReady === "function"){
-      // el app ya llama a onDataReady → no hacemos nada aquí
-      return;
+      return; // el app llamará a __PV6_M2_INIT__()
     }
-    // en caso de que no haya hook, intentar tras breve espera
     setTimeout(()=>M2.init(), 400);
   };
   boot();
 
-  // Exponer entrada pública
+  // Entrada pública (llamada desde app.v6.js bridge)
   window.__PV6_M2_INIT__ = () => M2.init();
 })();
