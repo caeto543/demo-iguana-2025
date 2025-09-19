@@ -251,14 +251,19 @@
         if (m.kind === "MOV_PATCH_ERR") console.warn("[MOV][SW] intercept error:", m.msg);
       });
     }
-  </script>
+ </script>
 
-  <!-- Parche JS (refuerzo) -->
-  <script src="pv6_mov_remote_patch.js?v=2.0"></script>
+<!-- Parche MOV remoto (intercepta CSV) -->
+<script src="pv6_mov_remote_patch.js?v=2.0"></script>
 
-  <!-- App y addons -->
-  <script src="app.v6.js?v=V6"></script>
-  <script src="pv6_m1_addon.js?v=1"></script>
-  <script src="pv6_m2_addon.js?v=2.2"></script>
+<!-- App base -->
+<script src="app.v6.js?v=V6"></script>
+
+<!-- Parche M3: FDN (120/FDN) + desperdicio por curva -->
+<script src="pv6_m3_fdn_waste_patch.js?v=3.0"></script>
+
+<!-- Addons -->
+<script src="pv6_m1_addon.js?v=1"></script>
+<script src="pv6_m2_addon.js?v=2.2"></script>
 </body>
 </html>
