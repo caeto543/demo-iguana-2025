@@ -1,7 +1,9 @@
-/* pv6_m2_addon.js — M2.2 (FIX Kg en sugeridos + estado correcto + padres/ocupados)
-   - Origen: padres ocupados reales (occ explícito si existe; si no UA>0). Autocorrección de fecha si no hay.
-   - Destino: salida de finca + sugeridos (ordenados por UA/PV/N) + todos los padres, marcando “(ocupado)” real.
-   - Sugeridos: tabla con Kg (last ≤ fecha), D0, Dadj y estado según Emin/Emax.
+/* pv6_m2_addon.js — M2.2 (alineado con ranking/libres)
+   - Kg MS/ha: mismos que UI (a la fecha “hasta” y según “Fuente”: 7d o Raw)
+   - Días: usa la misma función del app (computeDays) → d0 = brutos, dadj = ajustados (parámetros)
+   - Estado: mismo semáforo que ranking/libres (usa helper del app si existe; fallback a Emin/Emax)
+   - Origen: padres ocupados reales (occ explícito o UA>0). Autocorrige fecha si no hay ocupados.
+   - Destino: salida de finca + sugeridos + todos (padres), “(ocupado)” real.
 */
 (function () {
   const M2 = {
@@ -18,10 +20,11 @@
       uso:60, auKg:10,
       overrideUA:null,
       uaIndex:null, occIndex:null,
-      parents:[]
+      parents:[],
+      fuente:"kgms_7d" // sincroniza con select de la UI si existe
     },
 
-    /* ========== UI ========== */
+    /* ========== UI autoinyectada ========== */
     ensureUI() {
       if (document.getElementById("pv6-manejo")) return;
       const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
@@ -76,15 +79,44 @@
     num(x){ if(typeof x==="number") return x; if(x==null) return 0; const s=String(x).replace(/\./g,"").replace(/,/g,"."); const v=parseFloat(s); return isFinite(v)?v:0; },
     isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
     findCol(row, names){ const want=new Set(names.map(this.norm)); for(const k of Object.keys(row)){ if(want.has(this.norm(k))) return k; } return null; },
+    nf1(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n); },
+    nf0(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n); },
 
-    /* ========== Kg MS/ha last ≤ fecha (desde PV6.data.kgms7dByPot) ========== */
+    /* ========== Fuente Kg (mismo comportamiento que la UI) ========== */
+    syncFuenteFromUI(){
+      // intenta leer el select "Fuente" si existe
+      const cands = ["fuente","source","sel-fuente","select-fuente"];
+      for (const id of cands){
+        const el = document.getElementById(id);
+        if (el && el.tagName==="SELECT"){
+          const v = String(el.value||"").toLowerCase();
+          if (v.includes("7d")) this.state.fuente="kgms_7d";
+          else if (v.includes("raw") || v.includes("dia")) this.state.fuente="kgms_raw";
+          el.addEventListener("change", ()=>{ this.syncFuenteFromUI(); this.renderAll(); });
+          return;
+        }
+      }
+      // si el app guarda en estado:
+      if (window.PV6?.state?.fuente) this.state.fuente = window.PV6.state.fuente;
+    },
+    currentKgMap(){
+      // intenta nombres estándar
+      const d = window.PV6?.data || {};
+      const prefer7 = d.kgms7dByPot || d.kgms_by_pot_7d || d.kg_7d_by_pot;
+      const preferR = d.kgmsRawByPot || d.kgms_by_pot_raw || d.kg_raw_by_pot || d.kgmsDiaByPot;
+      if (this.state.fuente==="kgms_raw" && preferR) return preferR;
+      if (this.state.fuente==="kgms_7d" && prefer7) return prefer7;
+      // heurística por nombre si no hay estándar
+      const keys = Object.keys(d||{});
+      const k7 = keys.find(k=>/kg.*7d.*by.*pot/i.test(k));
+      const kr = keys.find(k=>/kg.*(raw|dia).*by.*pot/i.test(k));
+      return (this.state.fuente==="kgms_7d" ? (d[k7]||d[kR]) : (d[kr]||d[k7])) || {};
+    },
     kgOnOrBefore(pot, dateISO){
       try{
-        const m = window.PV6?.data?.kgms7dByPot?.[pot]; if (!m) return null;
+        const m = this.currentKgMap()?.[pot]; if (!m) return null;
         let bestDate=null, bestVal=null;
-        for (const k in m){
-          if (k<=dateISO && (bestDate===null || k>bestDate)){ bestDate=k; bestVal=m[k]; }
-        }
+        for (const k in m){ if (k<=dateISO && (bestDate===null || k>bestDate)){ bestDate=k; bestVal=m[k]; } }
         return (bestVal==null || Number.isNaN(bestVal)) ? null : Number(bestVal);
       }catch{ return null; }
     },
@@ -128,39 +160,46 @@
     /* ========== Padres ========== */
     buildParents(){
       const S=new Set();
-      try{
-        for (const f of (window.PV6?.data?.geojson?.features||[])){
-          const nm=f?.properties?.name_canon || f?.properties?.__canon || f?.properties?.name || f?.properties?.padre;
-          if (this.isParentName(nm)) S.add(String(nm).trim());
-        }
-      }catch{}
-      try{
-        for (const r of (window.PV6?.data?.movRows||[])){
-          const nm=r?.name_canon || r?.potrero || r?.name || r?.padre;
-          if (this.isParentName(nm)) S.add(String(nm).trim());
-        }
-      }catch{}
-      try{
-        for (const k of Object.keys(window.PV6?.data?.kgms7dByPot||{})){
-          if (this.isParentName(k)) S.add(k);
-        }
-      }catch{}
+      try{ for (const f of (window.PV6?.data?.geojson?.features||[])){
+        const nm=f?.properties?.name_canon || f?.properties?.__canon || f?.properties?.name || f?.properties?.padre;
+        if (this.isParentName(nm)) S.add(String(nm).trim());
+      }}catch{}
+      try{ for (const r of (window.PV6?.data?.movRows||[])){
+        const nm=r?.name_canon || r?.potrero || r?.name || r?.padre;
+        if (this.isParentName(nm)) S.add(String(nm).trim());
+      }}catch{}
+      try{ for (const k of Object.keys(this.currentKgMap()||{})){ if (this.isParentName(k)) S.add(k); } }catch{}
       this.state.parents = Array.from(S).sort((a,b)=>a.localeCompare(b));
     },
 
-    /* ========== Días con override ========== */
-    computeDaysSafe(pot, uaOverride){
-      try{
-        if (window.PV6 && typeof PV6.computeDays==="function"){
-          return PV6.computeDays(pot, this.state.dateEnd, uaOverride);
-        }
-      }catch{}
+    /* ========== Días y Estado (idénticos al ranking/libres) ========== */
+    computeDays(pot, uaOverride){
+      // usa helper del app si existe (misma metodología del ranking)
+      if (window.PV6 && typeof window.PV6.computeDays === "function"){
+        return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride);
+      }
+      // fallback consistente con la fuente actual
       const kgms = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 2000;
       const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
       const of = kgms * area * (this.state.uso/100);
       const dem = (uaOverride>0?uaOverride:1)*this.state.auKg;
-      const d = dem>0 ? of/dem : 0;
-      return { d0:d, dadj: Math.max(0, d*0.85) };
+      const d0 = dem>0 ? of/dem : 0;
+      const dadj = Math.max(0, d0 * (window.PV6?.state?.params?.ajusteDias ?? 0.85));
+      return { d0, dadj };
+    },
+    stateForKg(kg){
+      // usa el mismo clasificador del app si existe
+      const ui = window.PV6?.ui;
+      if (ui && typeof ui.stateForKg === "function") return ui.stateForKg(kg, this.state.dateEnd);
+      if (typeof window.stateForKg === "function") return window.stateForKg(kg, this.state.dateEnd);
+      if (typeof window.PV6?.classifyKg === "function") return window.PV6.classifyKg(kg, this.state.dateEnd);
+
+      // fallback: Emin/Emax
+      const Emin = window.PV6?.state?.params?.Emin ?? 2600;
+      const Emax = window.PV6?.state?.params?.Emax ?? 3200;
+      if (kg==null) return {label:"Ajuste", cls:"yellow"};
+      if (kg>=Emin && kg<=Emax) return {label:"Verde", cls:"green"};
+      return {label:"Ajuste", cls:"yellow"};
     },
 
     /* ========== Sugeridos (lista + tabla) ========== */
@@ -169,7 +208,7 @@
       try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd) : []); }catch{}
       let names = (base.length ? base.map(r=>r.nm) : this.state.parents).filter(n=>this.state.parents.includes(n));
       if (uaOverride && uaOverride>0){
-        const scored = names.map(p=>({p, s:(this.computeDaysSafe(p,uaOverride).dadj ?? 0)})).sort((a,b)=> b.s - a.s);
+        const scored = names.map(p=>({p, s:(this.computeDays(p,uaOverride).dadj ?? 0)})).sort((a,b)=> b.s - a.s);
         names = scored.map(x=>x.p);
       }
       return names.slice(0,12);
@@ -177,23 +216,17 @@
     renderSuggestedTable(uaOverride){
       const body=document.getElementById("m2-sugg-body"); if(!body) return;
       body.innerHTML="";
-      const fmt1=n=>new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n);
-      const fmt0=n=>new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n);
-
-      const Emin = window.PV6?.state?.params?.Emin ?? 2600;
-      const Emax = window.PV6?.state?.params?.Emax ?? 3200;
-
       for(const p of this.getSuggestedParents(uaOverride||0)){
         const kg = this.kgOnOrBefore(p, this.state.dateEnd);
-        const {d0,dadj} = this.computeDaysSafe(p, uaOverride||0);
-        const ok = (kg!=null && kg>=Emin && kg<=Emax);
+        const {d0,dadj} = this.computeDays(p, uaOverride||0);
+        const st = this.stateForKg(kg);
         const tr=document.createElement("tr");
         tr.innerHTML = `
           <td style="text-align:left">${p}</td>
-          <td>${kg!=null?fmt0(kg):"–"}</td>
-          <td>${d0!=null?fmt1(Math.max(0,d0)):"–"}</td>
-          <td>${dadj!=null?fmt1(Math.max(0,dadj)):"–"}</td>
-          <td>${ok?'<span class="state green">Verde</span>':'<span class="state yellow">Ajuste</span>'}</td>`;
+          <td>${kg!=null?this.nf0(kg):"–"}</td>
+          <td>${d0!=null?this.nf1(Math.max(0,d0)):"–"}</td>
+          <td>${dadj!=null?this.nf1(Math.max(0,dadj)):"–"}</td>
+          <td><span class="state ${st.cls}">${st.label}</span></td>`;
         body.appendChild(tr);
       }
     },
@@ -203,7 +236,6 @@
       const sel=document.getElementById("mov-origin"); if(!sel) return;
       sel.innerHTML="";
       const d=this.state.dateEnd;
-
       const occParents = this.state.parents.filter(p=>this.isOccupied(p,d));
       if (!occParents.length){
         const dates=this.allMoveDates();
@@ -265,16 +297,29 @@
       if (kind==="enter"){ const dst=selD?.value; if(!dst||dst==="__OUT__") return alert("Elige un destino válido para Ingresar."); return this.applyIngress(dst, uaV); }
       const src=selO?.value, dst=selD?.value; if(!src) return alert("Selecciona un origen."); if(!dst) return alert("Selecciona un destino (o salida de finca)."); if(uaV<=0) return alert("Indica la UA a mover."); if(dst==="__OUT__") this.applyExit(src, uaV); else this.applyMove(src,dst,uaV);
     },
-    afterChange(){
-      this.refreshOrigin(); this.refreshDest(); this.recalcKPI();
-      const ua=this.state.overrideUA??0; this.renderSuggestedTable(ua);
+    afterChange(){ this.renderAll(); },
+
+    /* ========== Render central (para sincronizar con UI) ========== */
+    renderAll(){
+      this.syncFuenteFromUI(); // asegurar fuente actual
+      // leer fecha “hasta” desde la UI si cambia
+      const de = document.getElementById("date-end")?.value;
+      if (de && de !== this.state.dateEnd) this.state.dateEnd = de;
+
+      this.refreshOrigin();
+      this.refreshDest();
+      this.recalcKPI();
+
+      const ua=this.state.overrideUA??0;
+      this.renderSuggestedTable(ua);
+
       if (window.PV6?.ui?.refreshMap) window.PV6.ui.refreshMap();
       if (window.PV6?.ui?.refreshRanking) window.PV6.ui.refreshRanking(ua||null);
     },
     recalcKPI(){
       const d=this.state.dateEnd; let tot=0;
       for(const p of this.state.parents){ if(this.isOccupied(p,d)){ const u=this.lastOnOrBefore(this.state.uaIndex,p,d,0); tot+=u; } }
-      const el=document.getElementById("kpi-ua-finca"); if(el) el.textContent=new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(tot);
+      const el=document.getElementById("kpi-ua-finca"); if(el) el.textContent=this.nf1(tot);
       if (window.PV6?.ui?.onKpiChange) window.PV6.ui.onKpiChange({uaTot:tot});
     },
 
@@ -290,10 +335,19 @@
       };
       ["input","change"].forEach(e=>{ elUA?.addEventListener(e,lock); elPV?.addEventListener(e,lock); elN?.addEventListener(e,lock); });
 
-      document.getElementById("btn-clear") ?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.refreshDest(); this.renderSuggestedTable(0); });
-      document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ const ua=this.state.overrideUA??0; this.refreshDest(); this.renderSuggestedTable(ua); console.log("[M2.2] sugeridos (UA override) =", ua); });
+      document.getElementById("btn-clear") ?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.renderAll(); });
+      document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ this.renderAll(); console.log("[M2.2] sugeridos (UA override) =", this.state.overrideUA??0); });
       document.getElementById("btn-move")   ?.addEventListener("click", ()=> this.apply("move"));
       document.getElementById("btn-enter")  ?.addEventListener("click", ()=> this.apply("enter"));
+
+      // reaccionar a cambios de fecha y fuente en la UI general
+      const dateEndEl = document.getElementById("date-end");
+      if (dateEndEl) dateEndEl.addEventListener("change", ()=> this.renderAll());
+      const fuenteIds = ["fuente","source","sel-fuente","select-fuente"];
+      for (const id of fuenteIds){
+        const el = document.getElementById(id);
+        if (el && el.tagName==="SELECT"){ el.addEventListener("change", ()=> this.renderAll()); }
+      }
     },
 
     /* ========== Init ========== */
@@ -303,6 +357,7 @@
       this.state.dateEnd = (window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
       this.state.uso     = +((window.PV6?.state?.coefUso) ?? this.state.uso);
       this.state.auKg    = +((window.PV6?.state?.auKg)    ?? this.state.auKg);
+      this.syncFuenteFromUI();
 
       this.buildParents();
 
@@ -310,25 +365,17 @@
       const {uaIdx,occIdx} = this.buildIndexes(movRows);
       this.state.uaIndex = uaIdx; this.state.occIndex = occIdx;
 
+      // extender fecha fin si hay MOV más nuevo
       const allDates = this.allMoveDates();
       if (allDates.length){
         const maxD = allDates[allDates.length-1];
         if (maxD > this.state.dateEnd){ this.state.dateEnd=maxD; const el=document.getElementById("date-end"); if(el) el.value=maxD; }
       }
 
-      this.refreshOrigin();
-      this.refreshDest();
       this.wireForm();
-      this.renderSuggestedTable(this.state.overrideUA ?? 0);
+      this.renderAll();
 
       console.log("[M2.2] inicializado");
-    },
-
-    allMoveDates(){
-      const S=new Set(); const ui=this.state.uaIndex||{}; const oi=this.state.occIndex||{};
-      for(const p in ui) for(const d in ui[p]) S.add(d);
-      for(const p in oi) for(const d in oi[p]) S.add(d);
-      return Array.from(S).sort();
     }
   };
 
