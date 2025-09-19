@@ -1,91 +1,49 @@
 /* pv6_m2_addon.js — M2.2 (alineado 1:1 con ranking/libres y “Fuente” RAW/7d)
-   - Kg MS/ha: mismos que la UI (fecha “hasta” y select “Fuente”)
-   - Días br.: (Oferta bruta) / (Demanda diaria)  → sin parámetros
-   - Días aj.: D_br * coef_uso * factor_FDN
-   - Estado: mismo que ranking/libres (usa helper del app si existe; fallback Emin/Emax)
-   - Origen: padres ocupados reales (occ explícito o UA>0). Autocorrección de fecha si no hay.
-   - Destino: salida de finca + sugeridos + todos (padres), “(ocupado)” real.
+   FIX: normalización de “fecha hasta” (dd/mm/aaaa → aaaa-mm-dd) para que Kg y estados coincidan.
 */
 (function () {
   const M2 = {
     MOV_COLS: {
-      date: ["fecha", "date", "dia"],
-      pot:  ["name_canon", "potrero", "name", "padre"],
+      date: ["fecha","date","dia"],
+      pot:  ["name_canon","potrero","name","padre"],
       ua:   ["ua","ua_total","UA","UA_total"],
       n:    ["n","N","n_total","N_total"],
       pv:   ["pv","pv_total_kg","PV_total_kg","pv_kg"],
-      occ:  ["ocupado","occ","occupied"]
+      occ:  ["ocupado","occ","occupied"],
     },
     state: {
-      dateEnd:null,
+      dateEnd:null,     // SIEMPRE en ISO (aaaa-mm-dd)
       uso:60, auKg:10,
       overrideUA:null,
       uaIndex:null, occIndex:null,
       parents:[],
-      fuente:"kgms_7d" // “kgms_7d” | “kgms_raw”
+      fuente:"kgms_7d"
     },
 
-    /* ================= UI ================= */
-    ensureUI() {
-      if (document.getElementById("pv6-manejo")) return;
-      const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
-      const card = document.createElement("div");
-      card.className = "card"; card.id = "pv6-manejo";
-      card.innerHTML = `
-        <div class="card-header">
-          <h4>Pastoreo con manejo (PV6)</h4><div style="font-size:12px;color:#64748b">M2.2</div>
-        </div>
-        <div style="padding:8px">
-          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
-            <label>UA <input id="mov-ua" type="number" min="0" step="0.1" /></label>
-            <label>PV total (kg) <input id="mov-pv" type="number" min="0" step="1" /></label>
-            <label>N total <input id="mov-n" type="number" min="0" step="1" /></label>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-            <label>Origen (ocupados)<select id="mov-origin"></select></label>
-            <label>Destino<select id="mov-dest"></select></label>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-            <button id="btn-recalc" class="btn">Recalcular sugeridos</button>
-            <button id="btn-enter"  class="btn">Ingresar</button>
-            <button id="btn-move"   class="btn">Mover</button>
-            <button id="btn-clear"  class="btn secondary">Limpiar</button>
-          </div>
-          <div class="table-wrap" style="max-height:28vh;overflow:auto;border:1px solid #e5e7eb;border-radius:10px">
-            <table class="rank" style="width:100%">
-              <thead><tr>
-                <th style="text-align:left">Potrero</th><th>Kg MS/ha</th>
-                <th>Días br. (est)</th><th>Días aj. (est)</th><th>Estado</th>
-              </tr></thead>
-              <tbody id="m2-sugg-body"></tbody>
-            </table>
-          </div>
-          <div style="margin-top:8px;font-size:12px;color:#475569">
-            Tip: si escribes <b>UA</b> se bloquean PV/N; si escribes <b>PV</b> convertimos a UA con auKg; si escribes <b>N</b> usamos N como UA.
-          </div>
-        </div>`;
-      if (anchor.id === "sim-card" && anchor.parentNode) anchor.parentNode.insertBefore(card, anchor.nextSibling);
-      else anchor.appendChild(card);
-      if (!document.getElementById("pv6-manejo-css")) {
-        const st = document.createElement("style"); st.id="pv6-manejo-css";
-        st.textContent = `#pv6-manejo label{display:flex;flex-direction:column;font-size:12px;color:#475569}
-                          #pv6-manejo input,#pv6-manejo select{padding:6px 8px;border:1px solid #d0d7e2;border-radius:8px}`;
-        document.head.appendChild(st);
-      }
-    },
-
-    /* =============== Utils =============== */
+    /* ================= Utils ================= */
     norm(s){ return String(s??"").trim().toLowerCase(); },
-    toISO(d){ return d instanceof Date ? d.toISOString().slice(0,10) : String(d??"").slice(0,10); },
-    num(x){ if(typeof x==="number") return x; if(x==null) return 0; const s=String(x).replace(/\./g,"").replace(/,/g,"."); const v=parseFloat(s); return isFinite(v)?v:0; },
-    isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
-    findCol(row, names){ const want=new Set(names.map(this.norm)); for(const k of Object.keys(row)){ if(want.has(this.norm(k))) return k; } return null; },
     nf1(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n); },
     nf0(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n); },
+    isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
+    findCol(row, names){ const want=new Set(names.map(this.norm)); for (const k of Object.keys(row)) if (want.has(this.norm(k))) return k; return null; },
 
-    /* ========== Fuente Kg (RAW/7d) igual que la UI ========== */
+    // --- Fecha: acepta ISO o dd/mm/aaaa, devuelve ISO ---
+    toISO(dstr){
+      if (!dstr) return null;
+      const s = String(dstr).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;                    // ya ISO
+      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);           // dd/mm/aaaa
+      if (m){
+        const dd = m[1].padStart(2,"0"), mm = m[2].padStart(2,"0"), aa = m[3];
+        return `${aa}-${mm}-${dd}`;
+      }
+      // fallback: Date.parse y a ISO
+      const dt = new Date(s); if (!isNaN(dt)) return dt.toISOString().slice(0,10);
+      return s;
+    },
+
+    /* ========== Fuente Kg (RAW/7d) igual a la UI ========== */
     syncFuenteFromUI(){
-      // leer select “Fuente” si existe
       const ids = ["fuente","source","sel-fuente","select-fuente"];
       for (const id of ids){
         const el = document.getElementById(id);
@@ -108,38 +66,30 @@
       try{
         const m = this.currentKgMap()?.[pot]; if (!m) return null;
         let bestD=null, best=null;
-        for(const k in m){ if(k<=dateISO && (bestD===null || k>bestD)){ bestD=k; best=m[k]; } }
+        for(const k in m){ const iso = this.toISO(k); if(iso && iso<=dateISO && (bestD===null || iso>bestD)){ bestD=iso; best=m[k]; } }
         return (best==null || Number.isNaN(best)) ? null : Number(best);
       }catch{ return null; }
     },
 
     /* =============== FDN =============== */
     getFDN(pot){
-      // buscar mapas comunes
       const d = window.PV6?.data || {};
-      const cands = ["fdnByPot","FND_by_pot","FND_por_potrero","FND_por_padre","fdn_por_potrero","fdn_por_padre"];
       for (const k of Object.keys(d)){
-        if (cands.includes(k) || /fdn|fnd/i.test(k)){
-          const map = d[k];
-          if (map && typeof map === "object"){
-            const v = map[pot]; if (v!=null) return Number(v);
-          }
-        }
+        if (/fdn|fnd/i.test(k)){ const map=d[k]; const v=map?.[pot]; if (v!=null) return Number(v); }
       }
-      return null; // sin dato → no penaliza
+      return null;
     },
     factorFDN(pot){
       const fdn = this.getFDN(pot);
       if (fdn==null) return 1;
-      // penalización suave si FDN > 0.68
-      const pen = Math.max(0, fdn - 0.68);
+      const pen = Math.max(0, fdn - 0.68);         // penaliza por encima de 0.68
       return Math.max(0, 1 - pen);
     },
 
     /* ========== Índices desde MOV ========== */
     buildIndexes(rows){
       const uaIdx={}, occIdx={};
-      if(!Array.isArray(rows) || !rows.length) return {uaIdx,occIdx};
+      if(!Array.isArray(rows)||!rows.length) return {uaIdx,occIdx};
       const sample=rows.find(r=>r && Object.keys(r).length); if(!sample) return {uaIdx,occIdx};
       const kDate=this.findCol(sample,this.MOV_COLS.date)||"date";
       const kPot =this.findCol(sample,this.MOV_COLS.pot)||"name_canon";
@@ -150,7 +100,7 @@
       const sorted=[...rows].map(r=>({
         date:this.toISO(r[kDate]),
         pot:String(r[kPot]??"").trim(),
-        ua:this.num(r[kUA]??r[kN]??0),
+        ua:Number(r[kUA]??r[kN]??0) || 0,
         occ:(r[kOcc]===undefined||r[kOcc]===null||r[kOcc]==="") ? null : (Number(r[kOcc])>0?1:0)
       })).filter(r=>r.pot && r.date).sort((a,b)=>a.date.localeCompare(b.date));
 
@@ -162,7 +112,7 @@
     },
     lastOnOrBefore(idx,pot,dateISO,def=0){
       const recs=idx?.[pot]; if(!recs) return def;
-      let best=def, bd=""; for(const d in recs){ if(d<=dateISO && d>=bd){ best=recs[d]; bd=d; } }
+      let best=def, bd=""; for(const d in recs){ const iso=this.toISO(d); if(iso && iso<=dateISO && iso>=bd){ best=recs[d]; bd=iso; } }
       return best;
     },
     isOccupied(pot, dateISO){
@@ -190,17 +140,15 @@
     /* ========== DÍAS (idéntico a ranking/libres) ========== */
     computeDays(pot, uaOverride){
       if (window.PV6 && typeof window.PV6.computeDays === "function"){
-        // la app ya incorpora parámetros → d0 y dadj consistentes
         return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride, this.state.fuente);
       }
-      // fallback con la misma metodología
-      const kg = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 0;       // Kg MS/ha según “Fuente”
-      const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;         // ha
-      const ua = Math.max(uaOverride||0, 1e-9);                          // UA para demanda
-      const ofertaBruta = kg * area;                                     // Kg MS totales
-      const demandaDia = ua * this.state.auKg;                           // Kg/d
-      const d0 = demandaDia>0 ? (ofertaBruta / demandaDia) : 0;          // días brutos
-      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);      // ajustados = parámetros + FDN
+      const kg = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 0;
+      const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
+      const ua = Math.max(uaOverride||0, 1e-9);
+      const oferta = kg * area;
+      const demandaDia = ua * this.state.auKg;
+      const d0 = demandaDia>0 ? (oferta/demandaDia) : 0;              // brutos
+      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);   // ajustados
       return { d0, dadj };
     },
 
@@ -231,7 +179,7 @@
     renderSuggestedTable(uaOverride){
       const body=document.getElementById("m2-sugg-body"); if(!body) return;
       body.innerHTML="";
-      for(const p of this.getSuggestedParents(uaOverride||0)){
+      for (const p of this.getSuggestedParents(uaOverride||0)){
         const kg = this.kgOnOrBefore(p, this.state.dateEnd);
         const {d0,dadj} = this.computeDays(p, uaOverride||0);
         const st = this.classifyKg(kg);
@@ -255,7 +203,7 @@
       if (!occParents.length){
         const dates=this.allMoveDates();
         for(let i=dates.length-1;i>=0;i--){
-          const dd=dates[i];
+          const dd=this.toISO(dates[i]);
           if (this.state.parents.some(p=>this.isOccupied(p,dd))){
             this.state.dateEnd = dd; const el=document.getElementById("date-end"); if(el) el.value=dd;
             return this.refreshOrigin();
@@ -289,9 +237,9 @@
     },
     allMoveDates(){
       const S=new Set(); const ui=this.state.uaIndex||{}; const oi=this.state.occIndex||{};
-      for(const p in ui) for(const d in ui[p]) S.add(d);
-      for(const p in oi) for(const d in oi[p]) S.add(d);
-      return Array.from(S).sort();
+      for(const p in ui) for(const d in ui[p]) S.add(this.toISO(d));
+      for(const p in oi) for(const d in oi[p]) S.add(this.toISO(d));
+      return Array.from(S).filter(Boolean).sort();
     },
 
     /* ========== Acciones ========== */
@@ -307,7 +255,7 @@
     applyExit(src, ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); this.addMovRow(d,src,-take); this.afterChange(); },
     applyMove(src,dst,ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); if(take<=0){alert("No hay UA suficientes en el origen para mover."); return;} this.addMovRow(d,src,-take); this.addMovRow(d,dst,+take); this.afterChange(); },
     apply(kind){
-      const selO=document.getElementById("mov-origin"); const selD=document.getElementById("mov-dest"); const uaV=this.num(document.getElementById("mov-ua")?.value);
+      const selO=document.getElementById("mov-origin"); const selD=document.getElementById("mov-dest"); const uaV=Number(document.getElementById("mov-ua")?.value)||0;
       if (kind==="enter"){ const dst=selD?.value; if(!dst||dst==="__OUT__") return alert("Elige un destino válido para Ingresar."); return this.applyIngress(dst, uaV); }
       const src=selO?.value, dst=selD?.value; if(!src) return alert("Selecciona un origen."); if(!dst) return alert("Selecciona un destino (o salida de finca)."); if(uaV<=0) return alert("Indica la UA a mover."); if(dst==="__OUT__") this.applyExit(src, uaV); else this.applyMove(src,dst,uaV);
     },
@@ -316,8 +264,11 @@
     /* ========== Render central (sincroniza con UI) ========== */
     renderAll(){
       this.syncFuenteFromUI();
-      const de = document.getElementById("date-end")?.value;
-      if (de && de !== this.state.dateEnd) this.state.dateEnd = de;
+
+      // Normalizar “hasta” a ISO
+      const rawEnd = document.getElementById("date-end")?.value || this.state.dateEnd;
+      const isoEnd = this.toISO(rawEnd);
+      if (isoEnd && isoEnd !== this.state.dateEnd) this.state.dateEnd = isoEnd;
 
       this.refreshOrigin();
       this.refreshDest();
@@ -338,9 +289,11 @@
 
     /* ========== Form ========== */
     wireForm(){
-      const elUA=document.getElementById("mov-ua"); const elPV=document.getElementById("mov-pv"); const elN=document.getElementById("mov-n");
+      const elUA=document.getElementById("mov-ua");
+      const elPV=document.getElementById("mov-pv");
+      const elN =document.getElementById("mov-n");
       const lock=()=>{
-        const ua=this.num(elUA?.value), pv=this.num(elPV?.value), n=this.num(elN?.value);
+        const ua=Number(elUA?.value)||0, pv=Number(elPV?.value)||0, n=Number(elN?.value)||0;
         if (ua>0){ if(elPV){elPV.value=""; elPV.disabled=true;} if(elN){elN.value=""; elN.disabled=true;} this.state.overrideUA=ua; }
         else if (pv>0){ const ua2=pv/this.state.auKg; if(elUA) elUA.value=String(ua2.toFixed(2)); if(elN){elN.value=""; elN.disabled=true;} if(elPV) elPV.disabled=false; this.state.overrideUA=ua2; }
         else if (n>0){ if(elUA) elUA.value=String(n); if(elPV){elPV.value=""; elPV.disabled=true;} this.state.overrideUA=n; }
@@ -349,7 +302,7 @@
       ["input","change"].forEach(e=>{ elUA?.addEventListener(e,lock); elPV?.addEventListener(e,lock); elN?.addEventListener(e,lock); });
 
       document.getElementById("btn-clear") ?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.renderAll(); });
-      document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ this.renderAll(); });
+      document.getElementById("btn-recalc")?.addEventListener("click", ()=> this.renderAll());
       document.getElementById("btn-move")   ?.addEventListener("click", ()=> this.apply("move"));
       document.getElementById("btn-enter")  ?.addEventListener("click", ()=> this.apply("enter"));
 
@@ -364,9 +317,12 @@
 
     /* ========== Init ========== */
     init(){
-      this.ensureUI();
+      // UI
+      if (!document.getElementById("pv6-manejo")) this.ensureUI();
 
-      this.state.dateEnd = (window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
+      // estado base (fecha → ISO)
+      const endRaw = (window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
+      this.state.dateEnd = this.toISO(endRaw);
       this.state.uso     = +((window.PV6?.state?.coefUso) ?? this.state.uso);
       this.state.auKg    = +((window.PV6?.state?.auKg)    ?? this.state.auKg);
       this.syncFuenteFromUI();
@@ -377,15 +333,15 @@
       const {uaIdx,occIdx} = this.buildIndexes(movRows);
       this.state.uaIndex = uaIdx; this.state.occIndex = occIdx;
 
-      const allDates = this.allMoveDates();
-      if (allDates.length){
-        const maxD = allDates[allDates.length-1];
+      // extender “hasta” si hay MOV más nuevo
+      const dates = this.allMoveDates();
+      if (dates.length){
+        const maxD = dates[dates.length-1];
         if (maxD > this.state.dateEnd){ this.state.dateEnd=maxD; const el=document.getElementById("date-end"); if(el) el.value=maxD; }
       }
 
       this.wireForm();
       this.renderAll();
-
       console.log("[M2.2] inicializado");
     }
   };
