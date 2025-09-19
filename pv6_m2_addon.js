@@ -1,8 +1,9 @@
-/* pv6_m2_addon.js — M2.2 (alineado con ranking/libres; robusto para nombres de mapas RAW/7d)
-   - Fuente Kg: localiza automáticamente los mapas de Kg aunque el key no tenga “raw/7d”
-   - Fecha “hasta”: normalizada a ISO (aaaa-mm-dd)
-   - Días br. = oferta/ingesta; Días aj. = D_br * coef_uso * factor_FDN
-   - Estado idéntico a ranking/libres
+/* pv6_m2_addon.js — M2.2 (alineado 1:1 con mapa/encabezado)
+   - Kg MS/ha: primero llamo a los helpers internos de la app (mismo dato que el mapa).
+   - Si no existen, caigo a mapas RAW/7d detectados automáticamente (con fecha normalizada).
+   - Fecha “hasta”: dd/mm/aaaa → aaaa-mm-dd.
+   - Días: brutos = oferta/ingesta; ajustados = brutos * coef_uso * factor_FDN.
+   - Estado: igual a ranking/libres.
 */
 (function () {
   const M2 = {
@@ -15,15 +16,15 @@
       occ:  ["ocupado","occ","occupied"],
     },
     state: {
-      dateEnd: null, uso: 60, auKg: 10,
-      overrideUA: null,
-      uaIndex: null, occIndex: null,
-      parents: [],
-      fuente: "kgms_7d",           // “kgms_7d” | “kgms_raw”
-      maps: { raw:null, s7d:null } // punteros a los mapas reales
+      dateEnd:null, uso:60, auKg:10,
+      overrideUA:null,
+      uaIndex:null, occIndex:null,
+      parents:[],
+      fuente:"kgms_7d",
+      maps:{raw:null,s7d:null}
     },
 
-    /* ========== helpers ========== */
+    /* ---------- utils ---------- */
     norm(s){ return String(s??"").trim().toLowerCase(); },
     nf1(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n); },
     nf0(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n); },
@@ -32,17 +33,15 @@
     toISO(s){
       if (!s) return null; const str=String(s).trim();
       if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
-      const m=str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (m){ const d=m[1].padStart(2,"0"), M=m[2].padStart(2,"0"), y=m[3]; return `${y}-${M}-${d}`; }
+      const m=str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (m){ const d=m[1].padStart(2,"0"), M=m[2].padStart(2,"0"), y=m[3]; return `${y}-${M}-${d}`; }
       const dt=new Date(str); return isNaN(dt)?str:dt.toISOString().slice(0,10);
     },
 
-    /* ========== UI ========== */
+    /* ---------- UI ---------- */
     ensureUI(){
       if (document.getElementById("pv6-manejo")) return;
-      const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
-      const el = document.createElement("div");
-      el.className="card"; el.id="pv6-manejo";
+      const anchor=document.getElementById("sim-card")||document.querySelector(".side")||document.body;
+      const el=document.createElement("div"); el.className="card"; el.id="pv6-manejo";
       el.innerHTML=`
         <div class="card-header"><h4>Pastoreo con manejo (PV6)</h4><div style="font-size:12px;color:#64748b">M2.2</div></div>
         <div style="padding:8px">
@@ -76,37 +75,7 @@
       else anchor.appendChild(el);
     },
 
-    /* ========== localizar mapas de Kg (robusto) ========== */
-    detectKgMaps(){
-      const d = window.PV6?.data || {};
-      const keys = Object.keys(d);
-      const isMap = (obj)=> obj && typeof obj==="object" && Object.values(obj)[0] && typeof Object.values(obj)[0]==="object";
-
-      // candidatos 7d
-      const cand7 = keys.filter(k=>isMap(d[k]) && /7d/i.test(k));
-      // candidatos raw/día
-      const candR = keys.filter(k=>isMap(d[k]) && (!/7d/i.test(k)) && (/(raw|dia|by_pot|kgms?_by_pot|kg_by_pot)/i.test(k)));
-
-      // preferidos explícitos si existen
-      const prefer7 = ["kgms7dByPot","kgms_by_pot_7d","kg_7d_by_pot"];
-      const preferR = ["kgmsRawByPot","kgmsDiaByPot","kgms_by_pot_raw","kg_raw_by_pot","kgms_by_pot","kg_by_pot"];
-
-      const pick = (pref, cands)=> pref.find(k=>d[k]) || cands[0] || null;
-
-      const k7  = pick(prefer7, cand7);
-      const kR  = pick(preferR, candR);
-
-      this.state.maps.s7d = k7 ? d[k7] : null;
-      this.state.maps.raw = kR ? d[kR] : null;
-
-      // Si por algún motivo no hay raw, pero sí 7d y la UI dice raw, al menos no caer a 7d silenciosamente.
-      if (!this.state.maps.raw && this.state.fuente==="kgms_raw"){
-        console.warn("[M2.2] mapa RAW no localizado; usando el más parecido disponible.");
-        // buscar cualquier mapa sin “7d”
-        const other = keys.find(k=>isMap(d[k]) && !/7d/i.test(k));
-        this.state.maps.raw = other ? d[other] : null;
-      }
-    },
+    /* ---------- fuente Kg = EXACTA a la UI ---------- */
     syncFuenteFromUI(){
       const ids=["fuente","source","sel-fuente","select-fuente"];
       for (const id of ids){
@@ -119,10 +88,51 @@
         }
       }
       if (window.PV6?.state?.fuente) this.state.fuente = window.PV6.state.fuente;
-      this.detectKgMaps();
+      this.detectKgMaps(); // rellena this.state.maps
     },
+    detectKgMaps(){
+      const d=window.PV6?.data||{};
+      const keys=Object.keys(d);
+      const looksLikeMap = k => {
+        const v=d[k]; if (!v || typeof v!=="object") return false;
+        const first=v[Object.keys(v)[0]]; return first && typeof first==="object";
+      };
+      const prefer7 = ["kgms7dByPot","kgms_by_pot_7d","kg_7d_by_pot"];
+      const preferR = ["kgmsRawByPot","kgmsDiaByPot","kgms_by_pot_raw","kg_raw_by_pot","kgms_by_pot","kg_by_pot"];
+      const pick=(pref, alt)=> pref.find(k=>d[k]) || alt.find(k=>looksLikeMap(k)) || null;
+
+      const cand = keys.filter(looksLikeMap);
+      const k7 = pick(prefer7, cand.filter(k=>/7d/i.test(k)));
+      const kR = pick(preferR, cand.filter(k=>!/_7d|7d/i.test(k)));
+
+      this.state.maps.s7d = k7 ? d[k7] : null;
+      this.state.maps.raw = kR ? d[kR] : null;
+    },
+
+    // === Kg EXACTO que usa el mapa/encabezado ===
+    kgFromApp(pot, dateISO){
+      const A = window.PV6 || {};
+      // funciones directas típicas
+      const fns = [
+        A.kgForPot, A.getKgForPot, A.kgmsForPot, A.getKgMsHaForPot,
+        A.ui?.kgForPot, A.ui?.getKgForPot, A.ui?.kgMsForPot
+      ].filter(fn=>typeof fn==="function");
+      for (const fn of fns){
+        try { const v = fn.call(A.ui||A, pot, dateISO, this.state.fuente); if (v!=null) return Number(v); } catch(_){}
+      }
+      // overlay/tabla actual que usa la UI
+      const candidates = [
+        A.ui?.currentKgByPot,
+        A.state?.overlayByPot,
+        A.data?.currentKgByPot,
+      ];
+      for (const m of candidates){ if (m && m[pot]!=null) return Number(m[pot]); }
+      return null;
+    },
+
+    // === Kg por fecha usando mapas (fallback robusto) ===
     currentKgMap(){ return this.state.fuente==="kgms_raw" ? (this.state.maps.raw||{}) : (this.state.maps.s7d||{}); },
-    kgOnOrBefore(pot, dateISO){
+    kgOnOrBeforeFallback(pot, dateISO){
       try{
         const m=this.currentKgMap()?.[pot]; if(!m) return null;
         let bestD=null, best=null;
@@ -130,8 +140,12 @@
         return (best==null || Number.isNaN(best)) ? null : Number(best);
       }catch{ return null; }
     },
+    kg(pot, dateISO){
+      const v = this.kgFromApp(pot, dateISO);
+      return (v!=null && !Number.isNaN(v)) ? v : this.kgOnOrBeforeFallback(pot, dateISO);
+    },
 
-    /* ========== FDN ========== */
+    /* ---------- FDN ---------- */
     getFDN(pot){
       const d=window.PV6?.data||{};
       for (const k of Object.keys(d)){ if (/fdn|fnd/i.test(k)){ const v=d[k]?.[pot]; if (v!=null) return Number(v); } }
@@ -139,7 +153,7 @@
     },
     factorFDN(pot){ const fdn=this.getFDN(pot); if (fdn==null) return 1; const pen=Math.max(0,fdn-0.68); return Math.max(0,1-pen); },
 
-    /* ========== MOV: UA/ocupado por fecha ========== */
+    /* ---------- MOV ---------- */
     buildIndexes(rows){
       const uaIdx={}, occIdx={};
       if(!Array.isArray(rows)||!rows.length) return {uaIdx,occIdx};
@@ -170,26 +184,26 @@
       return ua>0;
     },
 
-    /* ========== padres ========== */
+    /* ---------- padres ---------- */
     buildParents(){
       const S=new Set();
-      try{ for(const f of (window.PV6?.data?.geojson?.features||[])){ const nm=f?.properties?.name_canon||f?.properties?.__canon||f?.properties?.name||f?.properties?.padre; if(this.isParentName(nm)) S.add(String(nm).trim()); } }catch{}
-      try{ for(const r of (window.PV6?.data?.movRows||[])){ const nm=r?.name_canon||r?.potrero||r?.name||r?.padre; if(this.isParentName(nm)) S.add(String(nm).trim()); } }catch{}
-      try{ for(const k of Object.keys(this.currentKgMap()||{})){ if(this.isParentName(k)) S.add(k); } }catch{}
+      try{ for(const f of (window.PV6?.data?.geojson?.features||[])){ const nm=f?.properties?.name_canon||f?.properties?.__canon||f?.properties?.name||f?.properties?.padre; if(this.isParentName(nm)) S.add(String(nm).trim()); }}catch{}
+      try{ for(const r of (window.PV6?.data?.movRows||[])){ const nm=r?.name_canon||r?.potrero||r?.name||r?.padre; if(this.isParentName(nm)) S.add(String(nm).trim()); }}catch{}
+      try{ for(const k of Object.keys(this.currentKgMap()||{})){ if(this.isParentName(k)) S.add(k); }}catch{}
       this.state.parents=Array.from(S).sort((a,b)=>a.localeCompare(b));
     },
 
-    /* ========== días/estado ========== */
+    /* ---------- días/estado ---------- */
     computeDays(pot, uaOverride){
       if (window.PV6 && typeof window.PV6.computeDays==="function"){
         return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride, this.state.fuente);
       }
-      const kg = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 0;
-      const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
-      const ua = Math.max(uaOverride||0, 1e-9);
-      const d0 = (kg*area)/(ua*this.state.auKg);
-      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);
-      return { d0, dadj };
+      const kg = this.kg(pot, this.state.dateEnd) ?? 0;
+      const area=(window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
+      const ua=Math.max(uaOverride||0, 1e-9);
+      const d0=(kg*area)/(ua*this.state.auKg);
+      const dadj=d0*(this.state.uso/100)*this.factorFDN(pot);
+      return {d0, dadj};
     },
     classifyKg(kg){
       const ui=window.PV6?.ui;
@@ -201,11 +215,11 @@
       return (kg>=Emin && kg<=Emax) ? {label:"Verde", cls:"green"} : {label:"Ajuste", cls:"yellow"};
     },
 
-    /* ========== sugeridos ========== */
+    /* ---------- sugeridos ---------- */
     getSuggestedParents(uaOverride){
       let base=[];
-      try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd, this.state.fuente) : []);}catch{}
-      let names = (base.length ? base.map(r=>r.nm) : this.state.parents).filter(n=>this.state.parents.includes(n));
+      try{ base=(typeof window.computeRanking==="function"?window.computeRanking(this.state.dateEnd,this.state.fuente):[]);}catch{}
+      let names=(base.length?base.map(r=>r.nm):this.state.parents).filter(n=>this.state.parents.includes(n));
       if (uaOverride && uaOverride>0){
         const scored=names.map(p=>({p, s:(this.computeDays(p,uaOverride).dadj||0)})).sort((a,b)=>b.s-a.s);
         names=scored.map(x=>x.p);
@@ -215,7 +229,7 @@
     renderSuggestedTable(uaOverride){
       const body=document.getElementById("m2-sugg-body"); if(!body) return; body.innerHTML="";
       for(const p of this.getSuggestedParents(uaOverride||0)){
-        const kg=this.kgOnOrBefore(p,this.state.dateEnd);
+        const kg=this.kg(p,this.state.dateEnd);
         const {d0,dadj}=this.computeDays(p,uaOverride||0);
         const st=this.classifyKg(kg);
         const tr=document.createElement("tr");
@@ -229,7 +243,7 @@
       }
     },
 
-    /* ========== selectores y acciones ========== */
+    /* ---------- selects / acciones ---------- */
     refreshOrigin(){
       const sel=document.getElementById("mov-origin"); if(!sel) return; sel.innerHTML="";
       const d=this.state.dateEnd;
@@ -237,8 +251,7 @@
       if (!occParents.length){
         const dates=this.allMoveDates();
         for(let i=dates.length-1;i>=0;i--){
-          const dd=this.toISO(dates[i]);
-          if (this.state.parents.some(p=>this.isOccupied(p,dd))){
+          const dd=this.toISO(dates[i]); if (this.state.parents.some(p=>this.isOccupied(p,dd))){
             this.state.dateEnd=dd; const el=document.getElementById("date-end"); if(el) el.value=dd; return this.refreshOrigin();
           }
         }
@@ -262,7 +275,6 @@
       for(const p in oi) for(const d in oi[p]) S.add(this.toISO(d));
       return Array.from(S).filter(Boolean).sort();
     },
-
     addMovRow(dateISO,pot,deltaUA){
       this.state.uaIndex[pot] ||= {};
       const prev=this.lastOnOrBefore(this.state.uaIndex,pot,dateISO,0);
@@ -279,16 +291,14 @@
     },
     afterChange(){ this.renderAll(); },
 
-    /* ========== render central / KPI ========== */
+    /* ---------- render/KPI ---------- */
     renderAll(){
-      this.syncFuenteFromUI(); // también (re)detecta mapas
+      this.syncFuenteFromUI(); // también detecta mapas
       const de=document.getElementById("date-end")?.value || this.state.dateEnd;
       const iso=this.toISO(de); if (iso && iso!==this.state.dateEnd) this.state.dateEnd=iso;
 
-      this.buildParents();      // por si cambió la fuente/mapa
-      this.refreshOrigin();
-      this.refreshDest();
-      this.recalcKPI();
+      this.buildParents();
+      this.refreshOrigin(); this.refreshDest(); this.recalcKPI();
 
       const ua=this.state.overrideUA??0;
       this.renderSuggestedTable(ua);
@@ -302,7 +312,7 @@
       if (window.PV6?.ui?.onKpiChange) window.PV6.ui.onKpiChange({uaTot:tot});
     },
 
-    /* ========== form ========== */
+    /* ---------- form ---------- */
     wireForm(){
       const ua=document.getElementById("mov-ua"), pv=document.getElementById("mov-pv"), n=document.getElementById("mov-n");
       const lock=()=>{
@@ -317,31 +327,23 @@
       document.getElementById("btn-recalc")?.addEventListener("click", ()=> this.renderAll());
       document.getElementById("btn-move")   ?.addEventListener("click", ()=> this.apply("move"));
       document.getElementById("btn-enter")  ?.addEventListener("click", ()=> this.apply("enter"));
-
       const end=document.getElementById("date-end"); if (end) end.addEventListener("change", ()=> this.renderAll());
       ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{ const el=document.getElementById(id); if(el && el.tagName==="SELECT") el.addEventListener("change", ()=> this.renderAll()); });
     },
 
-    /* ========== init ========== */
-    ensureInjectedOnce(){
-      if (document.getElementById("pv6-manejo-css")) return;
-      const st=document.createElement("style"); st.id="pv6-manejo-css";
-      st.textContent=`#pv6-manejo label{display:flex;flex-direction:column;font-size:12px;color:#475569}
-                      #pv6-manejo input,#pv6-manejo select{padding:6px 8px;border:1px solid #d0d7e2;border-radius:8px}`;
-      document.head.appendChild(st);
-    },
+    /* ---------- init ---------- */
     init(){
-      this.ensureUI(); this.ensureInjectedOnce();
+      this.ensureUI();
 
-      const rawEnd=(window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
+      const rawEnd=(window.PV6?.state?.end)||document.getElementById("date-end")?.value||"2025-12-31";
       this.state.dateEnd=this.toISO(rawEnd);
-      this.state.uso  = +((window.PV6?.state?.coefUso) ?? this.state.uso);
-      this.state.auKg = +((window.PV6?.state?.auKg)    ?? this.state.auKg);
+      this.state.uso = +((window.PV6?.state?.coefUso) ?? this.state.uso);
+      this.state.auKg= +((window.PV6?.state?.auKg)    ?? this.state.auKg);
 
-      this.syncFuenteFromUI();           // también detecta mapas
+      this.syncFuenteFromUI(); // también detecta mapas
       this.buildParents();
 
-      const movRows=window.PV6?.data?.movRows || [];
+      const movRows=window.PV6?.data?.movRows||[];
       const {uaIdx,occIdx}=this.buildIndexes(movRows);
       this.state.uaIndex=uaIdx; this.state.occIndex=occIdx;
 
@@ -354,7 +356,7 @@
     }
   };
 
-  /* boot + hook público */
+  /* boot + hook */
   const boot=()=>{ if (document.readyState==="loading"){ document.addEventListener("DOMContentLoaded", boot, {once:true}); return; } if (window.PV6 && typeof PV6.onDataReady==="function") return; setTimeout(()=>M2.init(),400); };
   boot();
   window.__PV6_M2_INIT__ = () => M2.init();
