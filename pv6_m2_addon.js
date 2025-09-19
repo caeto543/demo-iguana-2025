@@ -1,8 +1,9 @@
-/* pv6_m2_addon.js — M2.2 (alineado con ranking/libres)
-   - Kg MS/ha: mismos que UI (a la fecha “hasta” y según “Fuente”: 7d o Raw)
-   - Días: usa la misma función del app (computeDays) → d0 = brutos, dadj = ajustados (parámetros)
-   - Estado: mismo semáforo que ranking/libres (usa helper del app si existe; fallback a Emin/Emax)
-   - Origen: padres ocupados reales (occ explícito o UA>0). Autocorrige fecha si no hay ocupados.
+/* pv6_m2_addon.js — M2.2 (alineado 1:1 con ranking/libres y “Fuente” RAW/7d)
+   - Kg MS/ha: mismos que la UI (fecha “hasta” y select “Fuente”)
+   - Días br.: (Oferta bruta) / (Demanda diaria)  → sin parámetros
+   - Días aj.: D_br * coef_uso * factor_FDN
+   - Estado: mismo que ranking/libres (usa helper del app si existe; fallback Emin/Emax)
+   - Origen: padres ocupados reales (occ explícito o UA>0). Autocorrección de fecha si no hay.
    - Destino: salida de finca + sugeridos + todos (padres), “(ocupado)” real.
 */
 (function () {
@@ -21,10 +22,10 @@
       overrideUA:null,
       uaIndex:null, occIndex:null,
       parents:[],
-      fuente:"kgms_7d" // sincroniza con select de la UI si existe
+      fuente:"kgms_7d" // “kgms_7d” | “kgms_raw”
     },
 
-    /* ========== UI autoinyectada ========== */
+    /* ================= UI ================= */
     ensureUI() {
       if (document.getElementById("pv6-manejo")) return;
       const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
@@ -73,7 +74,7 @@
       }
     },
 
-    /* ========== Utils ========== */
+    /* =============== Utils =============== */
     norm(s){ return String(s??"").trim().toLowerCase(); },
     toISO(d){ return d instanceof Date ? d.toISOString().slice(0,10) : String(d??"").slice(0,10); },
     num(x){ if(typeof x==="number") return x; if(x==null) return 0; const s=String(x).replace(/\./g,"").replace(/,/g,"."); const v=parseFloat(s); return isFinite(v)?v:0; },
@@ -82,43 +83,57 @@
     nf1(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n); },
     nf0(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n); },
 
-    /* ========== Fuente Kg (mismo comportamiento que la UI) ========== */
+    /* ========== Fuente Kg (RAW/7d) igual que la UI ========== */
     syncFuenteFromUI(){
-      // intenta leer el select "Fuente" si existe
-      const cands = ["fuente","source","sel-fuente","select-fuente"];
-      for (const id of cands){
+      // leer select “Fuente” si existe
+      const ids = ["fuente","source","sel-fuente","select-fuente"];
+      for (const id of ids){
         const el = document.getElementById(id);
         if (el && el.tagName==="SELECT"){
           const v = String(el.value||"").toLowerCase();
-          if (v.includes("7d")) this.state.fuente="kgms_7d";
-          else if (v.includes("raw") || v.includes("dia")) this.state.fuente="kgms_raw";
+          this.state.fuente = (v.includes("raw")||v.includes("dia")) ? "kgms_raw" : "kgms_7d";
           el.addEventListener("change", ()=>{ this.syncFuenteFromUI(); this.renderAll(); });
           return;
         }
       }
-      // si el app guarda en estado:
       if (window.PV6?.state?.fuente) this.state.fuente = window.PV6.state.fuente;
     },
     currentKgMap(){
-      // intenta nombres estándar
       const d = window.PV6?.data || {};
-      const prefer7 = d.kgms7dByPot || d.kgms_by_pot_7d || d.kg_7d_by_pot;
-      const preferR = d.kgmsRawByPot || d.kgms_by_pot_raw || d.kg_raw_by_pot || d.kgmsDiaByPot;
-      if (this.state.fuente==="kgms_raw" && preferR) return preferR;
-      if (this.state.fuente==="kgms_7d" && prefer7) return prefer7;
-      // heurística por nombre si no hay estándar
-      const keys = Object.keys(d||{});
-      const k7 = keys.find(k=>/kg.*7d.*by.*pot/i.test(k));
-      const kr = keys.find(k=>/kg.*(raw|dia).*by.*pot/i.test(k));
-      return (this.state.fuente==="kgms_7d" ? (d[k7]||d[kR]) : (d[kr]||d[k7])) || {};
+      const m7 = d.kgms7dByPot || d.kgms_by_pot_7d || d.kg_7d_by_pot;
+      const mr = d.kgmsRawByPot || d.kgmsDiaByPot || d.kgms_by_pot_raw || d.kg_raw_by_pot;
+      return this.state.fuente==="kgms_raw" ? (mr||m7||{}) : (m7||mr||{});
     },
     kgOnOrBefore(pot, dateISO){
       try{
         const m = this.currentKgMap()?.[pot]; if (!m) return null;
-        let bestDate=null, bestVal=null;
-        for (const k in m){ if (k<=dateISO && (bestDate===null || k>bestDate)){ bestDate=k; bestVal=m[k]; } }
-        return (bestVal==null || Number.isNaN(bestVal)) ? null : Number(bestVal);
+        let bestD=null, best=null;
+        for(const k in m){ if(k<=dateISO && (bestD===null || k>bestD)){ bestD=k; best=m[k]; } }
+        return (best==null || Number.isNaN(best)) ? null : Number(best);
       }catch{ return null; }
+    },
+
+    /* =============== FDN =============== */
+    getFDN(pot){
+      // buscar mapas comunes
+      const d = window.PV6?.data || {};
+      const cands = ["fdnByPot","FND_by_pot","FND_por_potrero","FND_por_padre","fdn_por_potrero","fdn_por_padre"];
+      for (const k of Object.keys(d)){
+        if (cands.includes(k) || /fdn|fnd/i.test(k)){
+          const map = d[k];
+          if (map && typeof map === "object"){
+            const v = map[pot]; if (v!=null) return Number(v);
+          }
+        }
+      }
+      return null; // sin dato → no penaliza
+    },
+    factorFDN(pot){
+      const fdn = this.getFDN(pot);
+      if (fdn==null) return 1;
+      // penalización suave si FDN > 0.68
+      const pen = Math.max(0, fdn - 0.68);
+      return Math.max(0, 1 - pen);
     },
 
     /* ========== Índices desde MOV ========== */
@@ -172,29 +187,29 @@
       this.state.parents = Array.from(S).sort((a,b)=>a.localeCompare(b));
     },
 
-    /* ========== Días y Estado (idénticos al ranking/libres) ========== */
+    /* ========== DÍAS (idéntico a ranking/libres) ========== */
     computeDays(pot, uaOverride){
-      // usa helper del app si existe (misma metodología del ranking)
       if (window.PV6 && typeof window.PV6.computeDays === "function"){
-        return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride);
+        // la app ya incorpora parámetros → d0 y dadj consistentes
+        return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride, this.state.fuente);
       }
-      // fallback consistente con la fuente actual
-      const kgms = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 2000;
-      const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
-      const of = kgms * area * (this.state.uso/100);
-      const dem = (uaOverride>0?uaOverride:1)*this.state.auKg;
-      const d0 = dem>0 ? of/dem : 0;
-      const dadj = Math.max(0, d0 * (window.PV6?.state?.params?.ajusteDias ?? 0.85));
+      // fallback con la misma metodología
+      const kg = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 0;       // Kg MS/ha según “Fuente”
+      const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;         // ha
+      const ua = Math.max(uaOverride||0, 1e-9);                          // UA para demanda
+      const ofertaBruta = kg * area;                                     // Kg MS totales
+      const demandaDia = ua * this.state.auKg;                           // Kg/d
+      const d0 = demandaDia>0 ? (ofertaBruta / demandaDia) : 0;          // días brutos
+      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);      // ajustados = parámetros + FDN
       return { d0, dadj };
     },
-    stateForKg(kg){
-      // usa el mismo clasificador del app si existe
+
+    /* ========== Estado (mismo que ranking/libres) ========== */
+    classifyKg(kg){
       const ui = window.PV6?.ui;
       if (ui && typeof ui.stateForKg === "function") return ui.stateForKg(kg, this.state.dateEnd);
       if (typeof window.stateForKg === "function") return window.stateForKg(kg, this.state.dateEnd);
       if (typeof window.PV6?.classifyKg === "function") return window.PV6.classifyKg(kg, this.state.dateEnd);
-
-      // fallback: Emin/Emax
       const Emin = window.PV6?.state?.params?.Emin ?? 2600;
       const Emax = window.PV6?.state?.params?.Emax ?? 3200;
       if (kg==null) return {label:"Ajuste", cls:"yellow"};
@@ -205,7 +220,7 @@
     /* ========== Sugeridos (lista + tabla) ========== */
     getSuggestedParents(uaOverride){
       let base=[];
-      try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd) : []); }catch{}
+      try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd, this.state.fuente) : []); }catch{}
       let names = (base.length ? base.map(r=>r.nm) : this.state.parents).filter(n=>this.state.parents.includes(n));
       if (uaOverride && uaOverride>0){
         const scored = names.map(p=>({p, s:(this.computeDays(p,uaOverride).dadj ?? 0)})).sort((a,b)=> b.s - a.s);
@@ -219,7 +234,7 @@
       for(const p of this.getSuggestedParents(uaOverride||0)){
         const kg = this.kgOnOrBefore(p, this.state.dateEnd);
         const {d0,dadj} = this.computeDays(p, uaOverride||0);
-        const st = this.stateForKg(kg);
+        const st = this.classifyKg(kg);
         const tr=document.createElement("tr");
         tr.innerHTML = `
           <td style="text-align:left">${p}</td>
@@ -243,7 +258,6 @@
           const dd=dates[i];
           if (this.state.parents.some(p=>this.isOccupied(p,dd))){
             this.state.dateEnd = dd; const el=document.getElementById("date-end"); if(el) el.value=dd;
-            console.log("[M2.2] Ajuste de fecha (sin ocupados) →", dd);
             return this.refreshOrigin();
           }
         }
@@ -289,9 +303,9 @@
         window.PV6.data.movRows.push({ date:dateISO, name_canon:pot, UA_total:Math.max(0, prev + deltaUA) });
       }
     },
-    applyIngress(dst, ua){ const d=this.state.dateEnd; this.addMovRow(d,dst, Math.max(0,ua)); this.afterChange(); console.log(`[M2.2] Ingresar → ${ua} UA a ${dst} (${d})`); },
-    applyExit(src, ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); this.addMovRow(d,src,-take); this.afterChange(); console.log(`[M2.2] Salida de finca ← ${take} UA desde ${src} (${d})`); },
-    applyMove(src,dst,ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); if(take<=0) return alert("No hay UA suficientes en el origen para mover."); this.addMovRow(d,src,-take); this.addMovRow(d,dst,+take); this.afterChange(); console.log(`[M2.2] Mover ${take} UA: ${src} → ${dst} (${d})`); },
+    applyIngress(dst, ua){ const d=this.state.dateEnd; this.addMovRow(d,dst, Math.max(0,ua)); this.afterChange(); },
+    applyExit(src, ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); this.addMovRow(d,src,-take); this.afterChange(); },
+    applyMove(src,dst,ua){ const d=this.state.dateEnd; const cur=this.lastOnOrBefore(this.state.uaIndex,src,d,0); const take=Math.min(cur, ua); if(take<=0){alert("No hay UA suficientes en el origen para mover."); return;} this.addMovRow(d,src,-take); this.addMovRow(d,dst,+take); this.afterChange(); },
     apply(kind){
       const selO=document.getElementById("mov-origin"); const selD=document.getElementById("mov-dest"); const uaV=this.num(document.getElementById("mov-ua")?.value);
       if (kind==="enter"){ const dst=selD?.value; if(!dst||dst==="__OUT__") return alert("Elige un destino válido para Ingresar."); return this.applyIngress(dst, uaV); }
@@ -299,10 +313,9 @@
     },
     afterChange(){ this.renderAll(); },
 
-    /* ========== Render central (para sincronizar con UI) ========== */
+    /* ========== Render central (sincroniza con UI) ========== */
     renderAll(){
-      this.syncFuenteFromUI(); // asegurar fuente actual
-      // leer fecha “hasta” desde la UI si cambia
+      this.syncFuenteFromUI();
       const de = document.getElementById("date-end")?.value;
       if (de && de !== this.state.dateEnd) this.state.dateEnd = de;
 
@@ -336,11 +349,10 @@
       ["input","change"].forEach(e=>{ elUA?.addEventListener(e,lock); elPV?.addEventListener(e,lock); elN?.addEventListener(e,lock); });
 
       document.getElementById("btn-clear") ?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.renderAll(); });
-      document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ this.renderAll(); console.log("[M2.2] sugeridos (UA override) =", this.state.overrideUA??0); });
+      document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ this.renderAll(); });
       document.getElementById("btn-move")   ?.addEventListener("click", ()=> this.apply("move"));
       document.getElementById("btn-enter")  ?.addEventListener("click", ()=> this.apply("enter"));
 
-      // reaccionar a cambios de fecha y fuente en la UI general
       const dateEndEl = document.getElementById("date-end");
       if (dateEndEl) dateEndEl.addEventListener("change", ()=> this.renderAll());
       const fuenteIds = ["fuente","source","sel-fuente","select-fuente"];
@@ -365,7 +377,6 @@
       const {uaIdx,occIdx} = this.buildIndexes(movRows);
       this.state.uaIndex = uaIdx; this.state.occIndex = occIdx;
 
-      // extender fecha fin si hay MOV más nuevo
       const allDates = this.allMoveDates();
       if (allDates.length){
         const maxD = allDates[allDates.length-1];
