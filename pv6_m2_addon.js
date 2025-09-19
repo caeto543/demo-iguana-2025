@@ -1,8 +1,14 @@
 /* pv6_m2_addon.js — M2.2 (alineado 1:1 con ranking/libres y “Fuente” RAW/7d)
-   FIX: normalización de “fecha hasta” (dd/mm/aaaa → aaaa-mm-dd) para que Kg y estados coincidan.
+   - FIX: normalización de “fecha hasta” (dd/mm/aaaa → aaaa-mm-dd) para que Kg y estados coincidan.
+   - Kg MS/ha = mismos que UI (fecha “hasta” + select “Fuente”)
+   - Días br. = oferta/ingesta (sin parámetros). Días aj. = D_br * coef_uso * factor_FDN
+   - Estado = mismo que ranking/libres (usa helper del app si existe; fallback Emin/Emax)
+   - Origen = padres ocupados reales (occ explícito o UA>0). Autocorrección de fecha si no hay.
+   - Destino = salida de finca + sugeridos + todos (padres), “(ocupado)” real.
 */
 (function () {
   const M2 = {
+    /* ================== Estado ================== */
     MOV_COLS: {
       date: ["fecha","date","dia"],
       pot:  ["name_canon","potrero","name","padre"],
@@ -12,37 +18,87 @@
       occ:  ["ocupado","occ","occupied"],
     },
     state: {
-      dateEnd:null,     // SIEMPRE en ISO (aaaa-mm-dd)
-      uso:60, auKg:10,
-      overrideUA:null,
-      uaIndex:null, occIndex:null,
-      parents:[],
-      fuente:"kgms_7d"
+      dateEnd: null,     // ISO (aaaa-mm-dd)
+      uso: 60, auKg: 10,
+      overrideUA: null,
+      uaIndex: null, occIndex: null,
+      parents: [],
+      fuente: "kgms_7d"  // “kgms_7d” | “kgms_raw”
     },
 
-    /* ================= Utils ================= */
+    /* ================== UI ================== */
+    ensureUI() {
+      if (document.getElementById("pv6-manejo")) return;
+      const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
+      const card = document.createElement("div");
+      card.className = "card";
+      card.id = "pv6-manejo";
+      card.innerHTML = `
+        <div class="card-header">
+          <h4>Pastoreo con manejo (PV6)</h4>
+          <div style="font-size:12px;color:#64748b">M2.2</div>
+        </div>
+        <div style="padding:8px">
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:8px">
+            <label>UA <input id="mov-ua" type="number" min="0" step="0.1" /></label>
+            <label>PV total (kg) <input id="mov-pv" type="number" min="0" step="1" /></label>
+            <label>N total <input id="mov-n" type="number" min="0" step="1" /></label>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+            <label>Origen (ocupados)<select id="mov-origin"></select></label>
+            <label>Destino<select id="mov-dest"></select></label>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            <button id="btn-recalc" class="btn">Recalcular sugeridos</button>
+            <button id="btn-enter"  class="btn">Ingresar</button>
+            <button id="btn-move"   class="btn">Mover</button>
+            <button id="btn-clear"  class="btn secondary">Limpiar</button>
+          </div>
+          <div class="table-wrap" style="max-height:28vh;overflow:auto;border:1px solid #e5e7eb;border-radius:10px">
+            <table class="rank" style="width:100%">
+              <thead><tr>
+                <th style="text-align:left">Potrero</th><th>Kg MS/ha</th>
+                <th>Días br. (est)</th><th>Días aj. (est)</th><th>Estado</th>
+              </tr></thead>
+              <tbody id="m2-sugg-body"></tbody>
+            </table>
+          </div>
+          <div style="margin-top:8px;font-size:12px;color:#475569">
+            Tip: si escribes <b>UA</b> se bloquean PV/N; si escribes <b>PV</b> convertimos a UA con auKg; si escribes <b>N</b> usamos N como UA.
+          </div>
+        </div>`;
+      if (anchor.id === "sim-card" && anchor.parentNode) anchor.parentNode.insertBefore(card, anchor.nextSibling);
+      else anchor.appendChild(card);
+
+      if (!document.getElementById("pv6-manejo-css")) {
+        const st = document.createElement("style");
+        st.id = "pv6-manejo-css";
+        st.textContent = `
+          #pv6-manejo label{display:flex;flex-direction:column;font-size:12px;color:#475569}
+          #pv6-manejo input,#pv6-manejo select{padding:6px 8px;border:1px solid #d0d7e2;border-radius:8px}`;
+        document.head.appendChild(st);
+      }
+    },
+
+    /* =============== Utils =============== */
     norm(s){ return String(s??"").trim().toLowerCase(); },
     nf1(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n); },
     nf0(n){ return new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n); },
     isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
     findCol(row, names){ const want=new Set(names.map(this.norm)); for (const k of Object.keys(row)) if (want.has(this.norm(k))) return k; return null; },
 
-    // --- Fecha: acepta ISO o dd/mm/aaaa, devuelve ISO ---
+    // dd/mm/aaaa → aaaa-mm-dd  |  ISO pasa tal cual
     toISO(dstr){
       if (!dstr) return null;
       const s = String(dstr).trim();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;                    // ya ISO
-      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);           // dd/mm/aaaa
-      if (m){
-        const dd = m[1].padStart(2,"0"), mm = m[2].padStart(2,"0"), aa = m[3];
-        return `${aa}-${mm}-${dd}`;
-      }
-      // fallback: Date.parse y a ISO
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+      const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m){ const dd=m[1].padStart(2,"0"), mm=m[2].padStart(2,"0"), aa=m[3]; return `${aa}-${mm}-${dd}`; }
       const dt = new Date(s); if (!isNaN(dt)) return dt.toISOString().slice(0,10);
       return s;
     },
 
-    /* ========== Fuente Kg (RAW/7d) igual a la UI ========== */
+    /* ======== Fuente Kg (RAW/7d) como la UI ======== */
     syncFuenteFromUI(){
       const ids = ["fuente","source","sel-fuente","select-fuente"];
       for (const id of ids){
@@ -66,7 +122,10 @@
       try{
         const m = this.currentKgMap()?.[pot]; if (!m) return null;
         let bestD=null, best=null;
-        for(const k in m){ const iso = this.toISO(k); if(iso && iso<=dateISO && (bestD===null || iso>bestD)){ bestD=iso; best=m[k]; } }
+        for(const k in m){
+          const iso = this.toISO(k);
+          if (iso && iso<=dateISO && (bestD===null || iso>bestD)){ bestD=iso; best=m[k]; }
+        }
         return (best==null || Number.isNaN(best)) ? null : Number(best);
       }catch{ return null; }
     },
@@ -75,18 +134,18 @@
     getFDN(pot){
       const d = window.PV6?.data || {};
       for (const k of Object.keys(d)){
-        if (/fdn|fnd/i.test(k)){ const map=d[k]; const v=map?.[pot]; if (v!=null) return Number(v); }
+        if (/fdn|fnd/i.test(k)){ const map = d[k]; const v = map?.[pot]; if (v!=null) return Number(v); }
       }
       return null;
     },
     factorFDN(pot){
       const fdn = this.getFDN(pot);
       if (fdn==null) return 1;
-      const pen = Math.max(0, fdn - 0.68);         // penaliza por encima de 0.68
+      const pen = Math.max(0, fdn - 0.68);
       return Math.max(0, 1 - pen);
     },
 
-    /* ========== Índices desde MOV ========== */
+    /* ======= Índices MOV (UA/ocupado por fecha) ======= */
     buildIndexes(rows){
       const uaIdx={}, occIdx={};
       if(!Array.isArray(rows)||!rows.length) return {uaIdx,occIdx};
@@ -96,14 +155,12 @@
       const kUA  =this.findCol(sample,this.MOV_COLS.ua)||"UA_total";
       const kN   =this.findCol(sample,this.MOV_COLS.n)||"N_total";
       const kOcc =this.findCol(sample,this.MOV_COLS.occ)||"ocupado";
-
       const sorted=[...rows].map(r=>({
         date:this.toISO(r[kDate]),
         pot:String(r[kPot]??"").trim(),
         ua:Number(r[kUA]??r[kN]??0) || 0,
         occ:(r[kOcc]===undefined||r[kOcc]===null||r[kOcc]==="") ? null : (Number(r[kOcc])>0?1:0)
       })).filter(r=>r.pot && r.date).sort((a,b)=>a.date.localeCompare(b.date));
-
       for(const r of sorted){
         (uaIdx[r.pot]  ||= {})[r.date] = r.ua;
         (occIdx[r.pot] ||= {})[r.date] = r.occ;
@@ -122,7 +179,7 @@
       return ua>0;
     },
 
-    /* ========== Padres ========== */
+    /* =============== Padres =============== */
     buildParents(){
       const S=new Set();
       try{ for (const f of (window.PV6?.data?.geojson?.features||[])){
@@ -137,7 +194,7 @@
       this.state.parents = Array.from(S).sort((a,b)=>a.localeCompare(b));
     },
 
-    /* ========== DÍAS (idéntico a ranking/libres) ========== */
+    /* =============== DÍAS =============== */
     computeDays(pot, uaOverride){
       if (window.PV6 && typeof window.PV6.computeDays === "function"){
         return window.PV6.computeDays(pot, this.state.dateEnd, uaOverride, this.state.fuente);
@@ -147,12 +204,12 @@
       const ua = Math.max(uaOverride||0, 1e-9);
       const oferta = kg * area;
       const demandaDia = ua * this.state.auKg;
-      const d0 = demandaDia>0 ? (oferta/demandaDia) : 0;              // brutos
-      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);   // ajustados
+      const d0 = demandaDia>0 ? (oferta/demandaDia) : 0;
+      const dadj = d0 * (this.state.uso/100) * this.factorFDN(pot);
       return { d0, dadj };
     },
 
-    /* ========== Estado (mismo que ranking/libres) ========== */
+    /* =============== Estado (semáforo) =============== */
     classifyKg(kg){
       const ui = window.PV6?.ui;
       if (ui && typeof ui.stateForKg === "function") return ui.stateForKg(kg, this.state.dateEnd);
@@ -165,7 +222,7 @@
       return {label:"Ajuste", cls:"yellow"};
     },
 
-    /* ========== Sugeridos (lista + tabla) ========== */
+    /* =============== Sugeridos (lista + tabla) =============== */
     getSuggestedParents(uaOverride){
       let base=[];
       try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd, this.state.fuente) : []); }catch{}
@@ -194,7 +251,7 @@
       }
     },
 
-    /* ========== Selectores ========== */
+    /* =============== Selectores =============== */
     refreshOrigin(){
       const sel=document.getElementById("mov-origin"); if(!sel) return;
       sel.innerHTML="";
@@ -242,7 +299,7 @@
       return Array.from(S).filter(Boolean).sort();
     },
 
-    /* ========== Acciones ========== */
+    /* =============== Acciones =============== */
     addMovRow(dateISO, pot, deltaUA){
       this.state.uaIndex[pot] ||= {};
       const prev = this.lastOnOrBefore(this.state.uaIndex, pot, dateISO, 0);
@@ -261,11 +318,9 @@
     },
     afterChange(){ this.renderAll(); },
 
-    /* ========== Render central (sincroniza con UI) ========== */
+    /* =============== Render central =============== */
     renderAll(){
       this.syncFuenteFromUI();
-
-      // Normalizar “hasta” a ISO
       const rawEnd = document.getElementById("date-end")?.value || this.state.dateEnd;
       const isoEnd = this.toISO(rawEnd);
       if (isoEnd && isoEnd !== this.state.dateEnd) this.state.dateEnd = isoEnd;
@@ -287,7 +342,7 @@
       if (window.PV6?.ui?.onKpiChange) window.PV6.ui.onKpiChange({uaTot:tot});
     },
 
-    /* ========== Form ========== */
+    /* =============== Form =============== */
     wireForm(){
       const elUA=document.getElementById("mov-ua");
       const elPV=document.getElementById("mov-pv");
@@ -315,12 +370,10 @@
       }
     },
 
-    /* ========== Init ========== */
+    /* =============== Init =============== */
     init(){
-      // UI
-      if (!document.getElementById("pv6-manejo")) this.ensureUI();
+      this.ensureUI();
 
-      // estado base (fecha → ISO)
       const endRaw = (window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
       this.state.dateEnd = this.toISO(endRaw);
       this.state.uso     = +((window.PV6?.state?.coefUso) ?? this.state.uso);
@@ -333,7 +386,6 @@
       const {uaIdx,occIdx} = this.buildIndexes(movRows);
       this.state.uaIndex = uaIdx; this.state.occIndex = occIdx;
 
-      // extender “hasta” si hay MOV más nuevo
       const dates = this.allMoveDates();
       if (dates.length){
         const maxD = dates[dates.length-1];
@@ -346,6 +398,7 @@
     }
   };
 
+  /* ===== Boot + hook público ===== */
   const boot = () => {
     if (document.readyState === "loading"){ document.addEventListener("DOMContentLoaded", boot, {once:true}); return; }
     if (window.PV6 && typeof PV6.onDataReady === "function") return;
