@@ -1,8 +1,7 @@
-/* pv6_m2_addon.js — M2.2 (FIX definitivo: origen vacío, z*, sugeridos UA)
-   - Origen = SOLO padres ocupados a la fecha (primero por MOV → UA>0 u ocupado=1; fallback: UA>0)
-   - Si no hay ocupados, autocorrige “hasta” hacia la última fecha con ocupados
-   - Destino: salida de finca + sugeridos + todos los padres (marcando “(ocupado)” real)
-   - “Recalcular sugeridos” usa UA/PV/N para ordenar y muestra tabla con Kg, D0, Dadj
+/* pv6_m2_addon.js — M2.2 (FIX Kg en sugeridos + estado correcto + padres/ocupados)
+   - Origen: padres ocupados reales (occ explícito si existe; si no UA>0). Autocorrección de fecha si no hay.
+   - Destino: salida de finca + sugeridos (ordenados por UA/PV/N) + todos los padres, marcando “(ocupado)” real.
+   - Sugeridos: tabla con Kg (last ≤ fecha), D0, Dadj y estado según Emin/Emax.
 */
 (function () {
   const M2 = {
@@ -19,10 +18,10 @@
       uso:60, auKg:10,
       overrideUA:null,
       uaIndex:null, occIndex:null,
-      parents:[]   // universo de PADRES (geo ⊔ nombres del MOV) sin *_z_*
+      parents:[]
     },
 
-    /* ========== UI autoinyectada ========== */
+    /* ========== UI ========== */
     ensureUI() {
       if (document.getElementById("pv6-manejo")) return;
       const anchor = document.getElementById("sim-card") || document.querySelector(".side") || document.body;
@@ -78,7 +77,19 @@
     isParentName(nm){ return !!nm && !String(nm).toLowerCase().includes('_z_'); },
     findCol(row, names){ const want=new Set(names.map(this.norm)); for(const k of Object.keys(row)){ if(want.has(this.norm(k))) return k; } return null; },
 
-    /* ========== Índices desde MOV (PV6.data.movRows) ========== */
+    /* ========== Kg MS/ha last ≤ fecha (desde PV6.data.kgms7dByPot) ========== */
+    kgOnOrBefore(pot, dateISO){
+      try{
+        const m = window.PV6?.data?.kgms7dByPot?.[pot]; if (!m) return null;
+        let bestDate=null, bestVal=null;
+        for (const k in m){
+          if (k<=dateISO && (bestDate===null || k>bestDate)){ bestDate=k; bestVal=m[k]; }
+        }
+        return (bestVal==null || Number.isNaN(bestVal)) ? null : Number(bestVal);
+      }catch{ return null; }
+    },
+
+    /* ========== Índices desde MOV ========== */
     buildIndexes(rows){
       const uaIdx={}, occIdx={};
       if(!Array.isArray(rows) || !rows.length) return {uaIdx,occIdx};
@@ -108,29 +119,30 @@
       return best;
     },
     isOccupied(pot, dateISO){
-      // 1) si hay 'ocupado' explícito en la última fila <= fecha → usarlo
       const occ = this.lastOnOrBefore(this.state.occIndex, pot, dateISO, null);
       if (occ!==null) return Number(occ)>0;
-      // 2) si no hay flag, usar UA>0
       const ua = this.lastOnOrBefore(this.state.uaIndex, pot, dateISO, 0);
       return ua>0;
     },
 
-    /* ========== Universo de PADRES ========== */
+    /* ========== Padres ========== */
     buildParents(){
       const S=new Set();
-      // geo
       try{
         for (const f of (window.PV6?.data?.geojson?.features||[])){
           const nm=f?.properties?.name_canon || f?.properties?.__canon || f?.properties?.name || f?.properties?.padre;
           if (this.isParentName(nm)) S.add(String(nm).trim());
         }
       }catch{}
-      // mov (por si un potrero no está en geo)
       try{
         for (const r of (window.PV6?.data?.movRows||[])){
           const nm=r?.name_canon || r?.potrero || r?.name || r?.padre;
           if (this.isParentName(nm)) S.add(String(nm).trim());
+        }
+      }catch{}
+      try{
+        for (const k of Object.keys(window.PV6?.data?.kgms7dByPot||{})){
+          if (this.isParentName(k)) S.add(k);
         }
       }catch{}
       this.state.parents = Array.from(S).sort((a,b)=>a.localeCompare(b));
@@ -143,7 +155,7 @@
           return PV6.computeDays(pot, this.state.dateEnd, uaOverride);
         }
       }catch{}
-      const kgms = (window.PV6?.data?.kgms7dByPot?.[pot]?.[this.state.dateEnd]) ?? 2000;
+      const kgms = this.kgOnOrBefore(pot, this.state.dateEnd) ?? 2000;
       const area = (window.PV6?.data?.areaHaByPot?.[pot]) ?? 1;
       const of = kgms * area * (this.state.uso/100);
       const dem = (uaOverride>0?uaOverride:1)*this.state.auKg;
@@ -156,10 +168,8 @@
       let base=[];
       try{ base = (typeof window.computeRanking==="function" ? window.computeRanking(this.state.dateEnd) : []); }catch{}
       let names = (base.length ? base.map(r=>r.nm) : this.state.parents).filter(n=>this.state.parents.includes(n));
-
       if (uaOverride && uaOverride>0){
-        const scored = names.map(p=>({p, s:(this.computeDaysSafe(p,uaOverride).dadj ?? 0)}))
-                            .sort((a,b)=> b.s - a.s);
+        const scored = names.map(p=>({p, s:(this.computeDaysSafe(p,uaOverride).dadj ?? 0)})).sort((a,b)=> b.s - a.s);
         names = scored.map(x=>x.p);
       }
       return names.slice(0,12);
@@ -170,10 +180,13 @@
       const fmt1=n=>new Intl.NumberFormat("es-CO",{maximumFractionDigits:1}).format(n);
       const fmt0=n=>new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n);
 
+      const Emin = window.PV6?.state?.params?.Emin ?? 2600;
+      const Emax = window.PV6?.state?.params?.Emax ?? 3200;
+
       for(const p of this.getSuggestedParents(uaOverride||0)){
-        const kg = (window.PV6?.data?.kgms7dByPot?.[p]?.[this.state.dateEnd]) ?? null;
+        const kg = this.kgOnOrBefore(p, this.state.dateEnd);
         const {d0,dadj} = this.computeDaysSafe(p, uaOverride||0);
-        const ok = kg!=null && (kg >= (window.PV6?.state?.params?.Emin ?? 2600)) && (kg <= (window.PV6?.state?.params?.Emax ?? 3200));
+        const ok = (kg!=null && kg>=Emin && kg<=Emax);
         const tr=document.createElement("tr");
         tr.innerHTML = `
           <td style="text-align:left">${p}</td>
@@ -191,15 +204,12 @@
       sel.innerHTML="";
       const d=this.state.dateEnd;
 
-      // padres ocupados reales en d
       const occParents = this.state.parents.filter(p=>this.isOccupied(p,d));
       if (!occParents.length){
-        // autocorrección hacia atrás: buscar última fecha con al menos 1 ocupado
         const dates=this.allMoveDates();
         for(let i=dates.length-1;i>=0;i--){
           const dd=dates[i];
-          const occ2=this.state.parents.some(p=>this.isOccupied(p,dd));
-          if (occ2){
+          if (this.state.parents.some(p=>this.isOccupied(p,dd))){
             this.state.dateEnd = dd; const el=document.getElementById("date-end"); if(el) el.value=dd;
             console.log("[M2.2] Ajuste de fecha (sin ocupados) →", dd);
             return this.refreshOrigin();
@@ -280,17 +290,16 @@
       };
       ["input","change"].forEach(e=>{ elUA?.addEventListener(e,lock); elPV?.addEventListener(e,lock); elN?.addEventListener(e,lock); });
 
-      document.getElementById("btn-clear")?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.refreshDest(); this.renderSuggestedTable(0); });
+      document.getElementById("btn-clear") ?.addEventListener("click", ()=>{ if(elUA) elUA.value=""; if(elPV){elPV.value=""; elPV.disabled=false;} if(elN){elN.value=""; elN.disabled=false;} this.state.overrideUA=null; this.refreshDest(); this.renderSuggestedTable(0); });
       document.getElementById("btn-recalc")?.addEventListener("click", ()=>{ const ua=this.state.overrideUA??0; this.refreshDest(); this.renderSuggestedTable(ua); console.log("[M2.2] sugeridos (UA override) =", ua); });
-      document.getElementById("btn-move") ?.addEventListener("click", ()=> this.apply("move"));
-      document.getElementById("btn-enter")?.addEventListener("click", ()=> this.apply("enter"));
+      document.getElementById("btn-move")   ?.addEventListener("click", ()=> this.apply("move"));
+      document.getElementById("btn-enter")  ?.addEventListener("click", ()=> this.apply("enter"));
     },
 
     /* ========== Init ========== */
     init(){
       this.ensureUI();
 
-      // tomar fecha y parámetros desde el app si existen
       this.state.dateEnd = (window.PV6?.state?.end) || document.getElementById("date-end")?.value || "2025-12-31";
       this.state.uso     = +((window.PV6?.state?.coefUso) ?? this.state.uso);
       this.state.auKg    = +((window.PV6?.state?.auKg)    ?? this.state.auKg);
@@ -301,7 +310,6 @@
       const {uaIdx,occIdx} = this.buildIndexes(movRows);
       this.state.uaIndex = uaIdx; this.state.occIndex = occIdx;
 
-      // Si hay MOV más nuevo que la fecha “hasta”, extender
       const allDates = this.allMoveDates();
       if (allDates.length){
         const maxD = allDates[allDates.length-1];
@@ -314,10 +322,16 @@
       this.renderSuggestedTable(this.state.overrideUA ?? 0);
 
       console.log("[M2.2] inicializado");
+    },
+
+    allMoveDates(){
+      const S=new Set(); const ui=this.state.uaIndex||{}; const oi=this.state.occIndex||{};
+      for(const p in ui) for(const d in ui[p]) S.add(d);
+      for(const p in oi) for(const d in oi[p]) S.add(d);
+      return Array.from(S).sort();
     }
   };
 
-  // Fallback si el app no llama onDataReady
   const boot = () => {
     if (document.readyState === "loading"){ document.addEventListener("DOMContentLoaded", boot, {once:true}); return; }
     if (window.PV6 && typeof PV6.onDataReady === "function") return;
@@ -325,6 +339,5 @@
   };
   boot();
 
-  // Entrada pública (lo invoca app.v6.js bridge)
   window.__PV6_M2_INIT__ = () => M2.init();
 })();
