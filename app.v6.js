@@ -449,7 +449,7 @@ function normalizeRow(r){
     PV6.data = PV6.data || {};
     PV6.data.geojson = gj;
 
-    // Mapa: potrero -> { fechaISO: kgms_7d (o raw si falta) }
+    // Mapa: potrero -> { fechaISO: kgms_7d }
     (function buildKg7(){
       const out = Object.create(null);
       for (const [nm, arr] of series) {
@@ -461,6 +461,22 @@ function normalizeRow(r){
         out[nm] = byDate;
       }
       PV6.data.kgms7dByPot = out;
+    })();
+
+    // *** NUEVO: mapa RAW potrero -> { fechaISO: kgms_raw } + aliases ***
+    (function buildKgRaw(){
+      const out = Object.create(null);
+      for (const [nm, arr] of series) {
+        const byDate = Object.create(null);
+        for (const r of arr) {
+          if (!r || !r.date) continue;
+          byDate[r.date] = (r.kgms_raw != null ? r.kgms_raw : (r.kgms_7d ?? null));
+        }
+        out[nm] = byDate;
+      }
+      PV6.data.kgmsRawByPot = out;      // nombre principal
+      PV6.data.kgms_by_pot  = out;      // alias común
+      PV6.data.kg_by_pot    = out;      // alias adicional
     })();
 
     // Áreas (objeto plano)
@@ -480,6 +496,18 @@ function normalizeRow(r){
     PV6.ui.refreshMap = renderMap;
     PV6.ui.refreshRanking = function(/* uaOverride opcional */){ renderRanking(); renderPastoreoChips(); };
     PV6.ui.onKpiChange = function(/* { uaTot } */){}; // opcional
+
+    // *** NUEVO: helpers de Kg EXACTOS (mismo dato del mapa/cabecera) ***
+    PV6.kgForPot = function(nm, dateISO, fuenteMode){
+      const d=parseDate(dateISO); const arr=series.get(nm)||[];
+      const useRaw = (String(fuenteMode||'').toLowerCase().includes('raw'));
+      let v = useRaw ? lastOnOrBefore(arr,d,'kgms_raw') : lastOnOrBefore(arr,d,'kgms_7d');
+      if (v==null) v = lastOnOrBefore(arr,d,'kgms_7d');
+      return v;
+    };
+    PV6.getKgForPot = PV6.kgForPot;
+    PV6.ui.kgForPot = (nm, dateISO, fuenteMode)=> PV6.kgForPot(nm, dateISO, fuenteMode);
+
     PV6.ui.getSuggestedDests = function(dateISO){
       const rs = computeRanking(dateISO);
       return rs.slice(0, 8).map(r => r.nm);
@@ -664,6 +692,9 @@ function renderMap(){
   const rankRows = state.overlay==='estado' ? computeRanking(ds) : [];
   const rankMap  = new Map(rankRows.map(r=>[r.nm, r.estado]));
 
+  // *** NUEVO: mapa de Kg actual para exponer a addon ***
+  const currentKgByPot = Object.create(null);
+
   if (!geoLayer) return;
   geoLayer.eachLayer(layer=>{
     const nm=layer.feature.properties.__canon; if(!nm) return;
@@ -678,12 +709,13 @@ function renderMap(){
     const occ=x.occ;
     const dslCalc=computeRestDaysFromEvents(m,dEnd);
 
+    const kgUse=(state.fuente==='raw')? (kgR ?? kg7) : (kg7 ?? kgR);
+    currentKgByPot[nm] = (kgUse!=null? Number(kgUse) : null);  // << expuesto abajo
+
     if (state.overlay==='biomasa'){
-      const v=(state.fuente==='raw')? (kgR ?? kg7) : (kg7 ?? kgR);
-      fill=biomasaColor(v,breaks);
+      fill=biomasaColor(kgUse,breaks);
     }else if (state.overlay==='descanso'){
-      const v=(state.fuente==='raw')? (kgR ?? kg7) : (kg7 ?? kgR);
-      fill=biomasaColor(v,breaks);
+      fill=biomasaColor(kgUse,breaks);
       if (PARENTS.has(nm) && dslCalc!=null && dslCalc>=0){
         const center=layer.getBounds().getCenter();
         const label=L.tooltip({permanent:true,className:'dsl-label',direction:'center',opacity:0.95}).setContent(String(dslCalc)).setLatLng(center);
@@ -702,7 +734,7 @@ function renderMap(){
     layer.setStyle({fillColor:fill,color:stroke,weight,fillOpacity:.9});
 
     const area=AREAS.get(nm)||0; const fnd=FND.has(nm)?FND.get(nm):null;
-    const kg=(state.fuente==='raw')? (kgR ?? kg7) : (kg7 ?? kgR);
+    const kg = kgUse;
     const UA_for_days = (x.occ ? x.UA : 0);
     const {D0,Dadj} = computeDays(kg,area,UA_for_days,fnd);
     const kgP = (state.overlay==='kg_proj') ? projectedKg(nm, ds) : null;
@@ -723,6 +755,13 @@ function renderMap(){
       <div>Días ajustados: ${Dadj!=null?fmt1(Math.max(0,Dadj)):'–'}</div>
     `);
   });
+
+  // *** NUEVO: exponer el mapa de Kg actual a addons ***
+  window.PV6 = window.PV6 || {};
+  PV6.ui = PV6.ui || {};
+  PV6.ui.currentKgByPot = currentKgByPot;
+  PV6.state = PV6.state || state;
+  PV6.state.overlayByPot = currentKgByPot;
 
   if (legendCtl){ legendCtl.remove(); legendCtl=null; }
   legendCtl=L.control({position:'bottomright'});
