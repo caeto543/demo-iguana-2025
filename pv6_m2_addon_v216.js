@@ -1,257 +1,254 @@
-/* =========================================================================
-   PV6 M2 — Pastoreo con manejo (card UI)  — v2.16
-   - Anti-duplicado (solo 1 instancia)
-   - Inserta automáticamente el card si no existe
-   - Origen: ocupados (desde MOV) a la fecha "hasta"
-   - Destino: sugeridos (Verde) + resto, excluye Z/ z*
-   - Tabla: Kg | Días br. | Días FDN | Δ desperd. (días) | Días aj. | Estado
-   - Cálculo: PV6.M3.computeDays(pot, fecha, UA)  (FDN 120/FDN + desperdicio)
-   ======================================================================== */
+/* PV6 M2.16 — Pastoreo con manejo (estable)
+   - Origen (ocupados) desde PV6.data.movRows
+   - Destino: Ninguno + Sugeridos (top Kg) + Todos (alfabético), excluye Z*
+   - Tabla: Dbr / Dfdn(120/FDN) / Δdesp(d)=min(wmax,β·Dfdn) / Daj / Estado(chips)
+   - Alinéa Kg con fecha “hasta” y fuente (raw/7d)
+*/
 (function(){
-  if (window.__PV6_M2_ACTIVE__) { console.log("[M2] otra instancia detectada → skip"); return; }
-  window.__PV6_M2_ACTIVE__ = true;
+  if (window.__PV6_M216__) return;  // evita dobles cargas
+  window.__PV6_M216__ = true;
 
-  (window.PV6 ||= {}); (PV6.data ||= {});
-  const M2 = {}; PV6.M2 = M2;
+  const A = window.PV6||{};
+  const D = A.data||{};
+  const S = A.state||{};
+  const $ = (s,r=document)=>r.querySelector(s);
+  const $$ = (s,r=document)=>Array.from(r.querySelectorAll(s));
 
-  // ----------------- IDs / helpers -----------------
-  const IDS = {
-    panel:"pv6-m2", title:"pv6-m2-title",
-    origin:"pv6-m2-origin", dest:"pv6-m2-dest",
-    ua:"pv6-ua", pv:"pv6-pvkg", n:"pv6-n",
-    recalc:"pv6-m2-recalc", clear:"pv6-m2-clear",
-    table:"pv6-m2-tab"
-  };
-  const auKgDefault = ()=> Number(PV6?.defaults?.auKg ?? 450);
-
-  function toISO(s){
-    if(!s) return null; const t=String(s).trim();
-    if(/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
-    const m=t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  function iso(s){
+    if(!s) return null;
+    s=String(s).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
-    const d=new Date(t); return isNaN(d)?t:d.toISOString().slice(0,10);
+    const dt=new Date(s); return isNaN(dt)? s : dt.toISOString().slice(0,10);
   }
-  const endISO = ()=> toISO(PV6.state?.end || document.getElementById("date-end")?.value);
+  function endISO(){
+    return iso(S.end || $("#date-end")?.value);
+  }
   function fuenteMode(){
-    const f=(PV6.state?.fuente||"kgms_7d").toLowerCase();
-    return (f.includes("raw")||f.includes("día")||f.includes("dia"))?"raw":"7d";
+    const f=(S.fuente||$("#fuente")?.value||$("#source")?.value||"").toLowerCase();
+    return (f.includes("raw")||f.includes("día")||f.includes("dia")) ? "kgms_raw" : "kgms_7d";
   }
-  const isZ = (n)=> /^z/i.test(n) || n.split(/[_-]/).some(seg=>/^z\d*$/i.test(seg));
 
-  function kgFor(pot){
-    const D=PV6.data||{};
-    const map = (fuenteMode()==="raw")
-      ? (D.kgmsRawByPot || D.kg_by_pot)
-      : (D.kgms7dByPot  || D.kgms_by_pot);
-    const s=map?.[pot]; if(!s) return null;
-    if(typeof s==="number") return s;
-    const ks=Object.keys(s).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
-    if(!ks.length) return Number(s)||null;
-    const end=endISO(); let pick=ks[0];
-    for(const k of ks){ if(k<=end) pick=k; else break; }
-    return Number(s[pick])||null;
-  }
-  function stateFor(kg){
+  // -------- Kg por potrero (alineado con UI) --------
+  function kgForPot(p){
+    const mode=fuenteMode(), end=endISO();
     try{
-      if(PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg, endISO());
-      if(typeof window.stateForKg==="function")         return window.stateForKg(kg, endISO());
+      if (typeof A.ui?.kgForPot==="function") return A.ui.kgForPot(p,end,mode);
+      if (typeof A.kgForPot==="function")     return A.kgForPot(p,end,mode);
     }catch(e){}
-    return "";
+    const map7 = (D.kgms7dByPot||D.kgms_by_pot||{})[p];
+    const mapR = (D.kgmsRawByPot||D.kg_by_pot ||{})[p];
+    const v7 = map7 ? map7[end] : null;
+    const vR = mapR ? mapR[end] : null;
+    return mode==="kgms_raw" ? (vR ?? v7 ?? null) : (v7 ?? vR ?? null);
   }
 
-  function haveCore(){ return PV6 && PV6.data && PV6.data.areaHaByPot; }
-  function haveMov(){  return Array.isArray(PV6.data?.movRows) && PV6.data.movRows.length>0; }
-  function haveFDN(){  return PV6.data?.fdnByPot && Object.keys(PV6.data.fdnByPot).length>0; }
-  async function waitForData(){
-    let d=150; for(let i=0;i<24;i++){ if(haveCore()&&haveMov()&&haveFDN()) return true; await new Promise(r=>setTimeout(r,d)); d=Math.min(d*1.5,450); }
-    return false;
-  }
-
-  // ----------------- Ocupados & destino -----------------
-  function ocupadosAtEnd(){
-    if (PV6.M3 && typeof PV6.M3.ocupadosAt==="function") return PV6.M3.ocupadosAt(endISO());
-    // fallback desde MOV:
-    const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows : [];
-    const idxUA={}, idxOcc={}; const end=endISO();
-    function set(idx,p,d,v){ (idx[p] ||= {})[d]=v; }
-    function last(idx,p){ const rec=idx[p]; if(!rec) return null; let best=null,bd=""; for(const k in rec){ const iso=toISO(k); if(iso && iso<=end && iso>=bd){ best=rec[k]; bd=iso; } } return best; }
-    rows.forEach(r=>{ const d=toISO(r.date), p=String(r.name_canon||"").trim(); if(!d||!p) return;
-      if (r.UA_total!=null) set(idxUA, p, d, Number(r.UA_total)||0);
-      set(idxOcc, p, d, (r.ocupado==null||r.ocupado==="")? null : Number(r.ocupado)>0?1:0);
-    });
-    const pots=Object.keys(PV6.data?.areaHaByPot||{}), out=[];
+  // -------- Ocupados desde movRows (≤ endISO) --------
+  function listOcupados(){
+    const rows = Array.isArray(D.movRows)? D.movRows : [];
+    const idxUA={}, idxO={};
+    for(const r of rows){
+      const d=iso(r.date), p=String(r.name_canon||"").trim();
+      if(!d||!p) continue;
+      (idxUA[p] ||= {})[d] = Number(r.UA_total||0);
+      (idxO[p]  ||= {})[d] = (r.ocupado==null||r.ocupado==="")? null : (Number(r.ocupado)>0?1:0);
+    }
+    function last(idx,p,limitISO){
+      const rec = idx[p]; if(!rec) return null;
+      let best=null, b="";
+      for(const k in rec){ const z=iso(k); if(z&&z<=limitISO&&z>=b){ best=rec[k]; b=z; } }
+      return best;
+    }
+    const limit=endISO();
+    const pots = Object.keys(D.areaHaByPot||{});
+    const out=[];
     pots.forEach(p=>{
-      const occ=last(idxOcc,p); if(occ!=null){ if(occ>0) out.push(p); return; }
-      const ua =last(idxUA,p)||0; if(ua>0) out.push(p);
+      const o = last(idxO,p,limit);
+      if (o!=null){ if(o>0) out.push(p); return; }
+      const ua= last(idxUA,p,limit)||0;
+      if (ua>0) out.push(p);
     });
     return out.sort();
   }
 
-  function buildOrigin(){
-    const sel=document.getElementById(IDS.origin); if(!sel) return;
-    const list=ocupadosAtEnd();
-    sel.innerHTML="";
-    if(!list.length){ sel.disabled=true; sel.append(new Option("(no hay ocupados a la fecha)","")); return; }
-    sel.disabled=false; list.forEach(p=> sel.append(new Option(p,p)));
-  }
-
-  function buildDest(){
-    const sel=document.getElementById(IDS.dest); if(!sel) return;
-    const pots=Object.keys(PV6.data?.areaHaByPot||{}).filter(n=>!isZ(n));
-    const rows=pots.map(p=>{ const kg=kgFor(p)||0; const st=stateFor(kg); return {p,kg,rank:(st==="Verde"?2:(st==="Ajuste"?1:0))}; });
-    const greens=rows.filter(r=>r.rank===2).sort((a,b)=>b.kg-a.kg).map(r=>r.p);
-    const others=rows.filter(r=>r.rank!==2).sort((a,b)=>a.p.localeCompare(b.p)).map(r=>r.p);
-
-    sel.innerHTML="";
-    sel.append(new Option("— Ningún potrero (salida de finca) —","__NONE__"));
-    if(greens.length){
-      const g=document.createElement("optgroup"); g.label="Destinos sugeridos";
-      greens.forEach(nm=> g.append(new Option(nm,nm)));
-      sel.appendChild(g);
-    }
-    const g2=document.createElement("optgroup"); g2.label="Todos los potreros";
-    others.forEach(nm=> g2.append(new Option(nm,nm)));
-    sel.appendChild(g2);
-  }
-
-  // ----------------- Cálculo -----------------
-  function readUA(){
-    const uaEl=document.getElementById(IDS.ua), pvEl=document.getElementById(IDS.pv), nEl=document.getElementById(IDS.n);
-    const ua=Number(uaEl?.value||0), pv=Number(pvEl?.value||0), n=Number(nEl?.value||0);
-    if(ua>0){ if(pvEl)pvEl.value=""; if(nEl)nEl.value=""; return ua; }
-    if(pv>0){ if(uaEl)uaEl.value=""; if(nEl)nEl.value=""; return pv/auKgDefault(); }
-    if(n>0){  if(uaEl)uaEl.value=""; if(pvEl)pvEl.value=""; return n; }
-    // por defecto usar UA del potrero seleccionado (si lo muestra la UI) o 0
-    return 0;
-  }
-
-  function computeRow(pot, UA){
-    // M3.computeDays devuelve: { kg, dbr, dfdn, phi, dadj }
-    const d = (PV6.M3 && typeof PV6.M3.computeDays==="function")
-      ? PV6.M3.computeDays(pot, endISO(), Math.max(1, UA||1))
-      : {kg: kgFor(pot)||0, dbr:0, dfdn:0, phi:1, dadj:0};
-    const delta = Math.max(0, (d.dfdn||0) - (d.dadj||0)); // Δ desperdicio en días
-    return { pot, kg:d.kg, dbr:d.dbr, dfdn:d.dfdn, delta, dadj:d.dadj, st: stateFor(d.kg) };
-  }
-
-  function renderTable(){
-    const tb=document.querySelector(`#${IDS.table} tbody`); if(!tb) return;
-    const UA = Math.max(1, readUA()||1);
-    const pots=Object.keys(PV6.data?.areaHaByPot||{}).filter(n=>!isZ(n));
-    const rows=pots.map(p=>{ const kg=kgFor(p)||0; const st=stateFor(kg); return {p,kg,rank:(st==="Verde"?2:(st==="Ajuste"?1:0))}; })
-                   .sort((a,b)=> (b.rank-a.rank) || (b.kg-a.kg));
-
-    tb.innerHTML="";
-    const frag=document.createDocumentFragment();
-    rows.forEach(r=>{
-      const d=computeRow(r.p, UA);
-      const tr=document.createElement("tr");
-      function td(v,align="right"){ const e=document.createElement("td"); e.style.textAlign=align; e.textContent=(v==null||v==="")?"—":v; return e; }
-      tr.appendChild(td(r.p,"left"));
-      tr.appendChild(td(isFinite(d.kg)   ? d.kg.toFixed(3):"—"));
-      tr.appendChild(td(isFinite(d.dbr)  ? d.dbr.toFixed(1):"0"));
-      tr.appendChild(td(isFinite(d.dfdn) ? d.dfdn.toFixed(1):"0"));
-      tr.appendChild(td(isFinite(d.delta)? d.delta.toFixed(1):"0"));    // Δ desperdicio (días)
-      tr.appendChild(td(isFinite(d.dadj) ? d.dadj.toFixed(1):"0"));
-      tr.appendChild(td(d.st||"—","center"));
-      frag.appendChild(tr);
-    });
-    tb.appendChild(frag);
-  }
-
-  function wire(){
-    [IDS.ua,IDS.pv,IDS.n].forEach(id=>{
-      const el=document.getElementById(id); if(el) el.addEventListener("input", renderTable);
-    });
-    const recalc=document.getElementById(IDS.recalc), clear=document.getElementById(IDS.clear);
-    if(recalc) recalc.addEventListener("click", renderTable);
-    if(clear)  clear .addEventListener("click", ()=>{["ua","pv","n"].forEach(k=>{const e=document.getElementById(IDS[k]); if(e) e.value="";}); renderTable();});
-
-    ["fuente","source","sel-fuente","select-fuente","date-end"].forEach(id=>{
-      const el=document.getElementById(id); if(el) el.addEventListener("change", ()=>{ buildOrigin(); buildDest(); renderTable(); });
-    });
-  }
-
-  // ----------------- Inserción del card -----------------
+  // -------- Panel UI (autocreación si falta) --------
   function ensurePanel(){
-    // si existe viejo, lo reciclo
-    const old=document.getElementById(IDS.panel);
-    if(old && old.parentNode){ old.parentNode.removeChild(old); }
+    let panel = $("#pv6-m2");
+    if(panel) return panel;
 
-    // buscar “Simular pastoreo (sin manejo)”
-    let anchor=null;
-    [...document.querySelectorAll("div,section,h2,h3")].some(el=>{
-      const t=(el.textContent||"").trim().toLowerCase();
-      if(/simular\s+pastoreo\s*\(sin manejo\)/i.test(t)){ anchor=el.closest("section,div")||el; return true; }
-      return false;
-    });
+    const mapCard = $$(".leaflet-container").slice(-1)[0]?.closest("div");
+    if(!mapCard) return null;
 
-    const card=document.createElement("section");
-    card.id=IDS.panel;
-    card.style.cssText="border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.04);";
-
-    card.innerHTML = `
-      <div id="${IDS.title}" style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
-        <strong>Pastoreo con manejo (PV6)</strong>
-        <small style="opacity:.6">M2.16</small>
-        <button id="${IDS.recalc}" style="margin-left:auto">Recalcular sugeridos</button>
-        <button id="${IDS.clear}">Limpiar</button>
+    panel = document.createElement("div");
+    panel.id="pv6-m2";
+    panel.style.marginTop="8px";
+    panel.innerHTML = `
+    <div class="card" style="padding:12px;border:1px solid #ddd;border-radius:10px">
+      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <strong>Pastoreo con manejo (PV6) <small class="text-muted">M2.16</small></strong>
+        <div style="display:flex;gap:8px">
+          <button id="m216-recalc" class="btn btn-sm btn-light">Recalcular sugeridos</button>
+          <button id="m216-clear"  class="btn btn-sm btn-light">Limpiar</button>
+        </div>
       </div>
-
-      <div style="display:grid;grid-template-columns:1fr 1fr; gap:8px; margin-bottom:8px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px">
         <label>Origen (ocupados)
-          <select id="${IDS.origin}"><option>(cargando…)</option></select>
+          <select id="m216-origen" class="form-control form-control-sm"></select>
         </label>
         <label>Destino
-          <select id="${IDS.dest}"><option>—</option></select>
+          <select id="m216-dest" class="form-control form-control-sm"></select>
+        </label>
+        <label>UA
+          <input id="m216-ua" class="form-control form-control-sm" type="number" step="1" placeholder="p.ej. 200"/>
+        </label>
+        <label>PV total (kg)
+          <input id="m216-pvkg" class="form-control form-control-sm" type="number" step="1" placeholder="p.ej. 81000"/>
         </label>
       </div>
-
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px; margin-bottom:8px;">
-        <label>UA <input id="${IDS.ua}" type="number" min="0" step="1" placeholder="p.ej. 200"></label>
-        <label>PV total (kg) <input id="${IDS.pv}" type="number" min="0" step="1" placeholder="p.ej. 81000"></label>
-        <label>N total <input id="${IDS.n}" type="number" min="0" step="1" placeholder="p.ej. 300"></label>
-      </div>
-
-      <div style="overflow:auto; max-height: 420px;">
-        <table id="${IDS.table}" style="width:100%; font-size:13px; border-collapse:collapse;">
-          <thead style="position:sticky;top:0;background:#fafafa">
-            <tr>
-              <th style="text-align:left;">Potrero</th>
-              <th>Kg MS/ha</th>
-              <th>Días br.</th>
-              <th>Días FDN</th>
-              <th>Δ desperd. (d)</th>
-              <th>Días aj.</th>
-              <th>Estado</th>
-            </tr>
-          </thead>
+      <div style="overflow:auto;max-height:360px">
+        <table id="m216-tab" class="table table-sm">
+          <thead><tr>
+            <th>Potrero</th><th class="text-end">Kg MS/ha</th>
+            <th class="text-end">Días br.</th><th class="text-end">Días FDN</th>
+            <th class="text-end">Δ desper. (d)</th><th class="text-end">Días aj.</th>
+            <th>Estado</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div style="opacity:.65; font-size:12px; margin-top:6px;">
-        Tip: UA ↔ PV/N son excluyentes. Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.
-      </div>
-    `;
-    if(anchor && anchor.parentNode) anchor.parentNode.insertBefore(card, anchor);
-    else (document.querySelector("aside,.right,.panel-derecho")||document.body).appendChild(card);
+    </div>`;
+    mapCard.parentElement.insertBefore(panel, mapCard.nextSibling);
+    return panel;
   }
 
-  // ----------------- Init -----------------
-  async function init(){
-    ensurePanel();
-    const ok = await waitForData();
-    buildOrigin(); buildDest(); wire(); renderTable();
-
-    if(!ok){
-      const iv=setInterval(()=>{
-        if(haveMov() && haveFDN()){ clearInterval(iv); buildOrigin(); buildDest(); renderTable(); }
-      },250); setTimeout(()=>clearInterval(iv),4000);
+  // -------- Selectores --------
+  function fillOrigen(){
+    const sel = $("#m216-origen"); if(!sel) return;
+    const occ = listOcupados();
+    sel.innerHTML="";
+    if (occ.length){
+      occ.forEach(p=>{ const o=document.createElement("option"); o.value=p; o.textContent=p; sel.appendChild(o); });
+    }else{
+      const o=document.createElement("option"); o.value=""; o.textContent="(no hay ocupados a la fecha)"; sel.appendChild(o);
     }
-    const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows : [];
-    console.log("[M2.16] listo — movRows:", rows.length, "fdnKey:", PV6.data?.fdnByPot?"fdnByPot":"(default)");
+  }
+  function fillDestino(){
+    const sel = $("#m216-dest"); if(!sel) return;
+    const all = Object.keys(D.areaHaByPot||{}).filter(p=>!/^z/i.test(p));
+    const top = [...all].map(p=>({p,kg:kgForPot(p)||0})).sort((a,b)=>b.kg-a.kg).slice(0,12).map(x=>x.p);
+
+    sel.innerHTML="";
+    const o0=document.createElement("option"); o0.value=""; o0.textContent="— Ningún potrero (salida de finca) —"; sel.appendChild(o0);
+    const g1=document.createElement("optgroup"); g1.label="Sugeridos";
+    top.forEach(p=>{ const o=document.createElement("option"); o.value=p; o.textContent=p; g1.appendChild(o); });
+    sel.appendChild(g1);
+
+    const g2=document.createElement("optgroup"); g2.label="Todos los potreros";
+    all.filter(p=>!top.includes(p)).sort((a,b)=>a.localeCompare(b)).forEach(p=>{
+      const o=document.createElement("option"); o.value=p; o.textContent=p; g2.appendChild(o);
+    });
+    sel.appendChild(g2);
   }
 
-  if(document.readyState==="loading") document.addEventListener("DOMContentLoaded", init, {once:true});
-  else init();
+  // -------- Parámetros & datos auxiliares --------
+  function params(){
+    const P = A.defaults?.params || A.params || {};
+    return {
+      coef: Number($("#coef-uso")?.value||S.coef||60)/100,
+      consumo: Number($("#consumo-base")?.value||S.consumo||10),
+      auKg: Number(A.defaults?.auKg ?? 450),
+      beta: Number(P.beta ?? 0.05),
+      wmax: Number(P.wmax ?? 0.30),
+    };
+  }
+  function fdnFor(p){
+    const v = D.fdnByPot?.[p];
+    if (v==null) return null;
+    const n = Number(v);
+    if(!isFinite(n)) return null;
+    return n>1? n/100 : n; // normaliza a fracción
+  }
+  function ofertaKg(p){
+    const kg = kgForPot(p)||0;
+    const ha = Number(D.areaHaByPot?.[p]||0);
+    const {coef} = params();
+    return kg * ha * coef;
+  }
+
+  // -------- Cálculos de días --------
+  function computeRow(p, UA){
+    const {consumo, auKg, beta, wmax} = params();
+    const kg = kgForPot(p)||0;
+    const off = ofertaKg(p);
+    const d_br = (UA>0 && consumo>0) ? (off/(UA*consumo)) : 0;
+
+    // FDN (120/FDN)
+    let d_fdn = d_br;
+    const fdn = fdnFor(p);
+    if (fdn && UA>0){
+      const imax = auKg * (120/(fdn*100)) / 100; // kg/UA/día
+      const cap = Math.min(consumo, imax);
+      d_fdn = cap>0 ? (off/(UA*cap)) : 0;
+    }
+
+    const delta = Math.min(wmax, beta * d_fdn);   // días a descontar
+    const d_aj  = Math.max(d_br, d_fdn - delta);  // conservador
+
+    // Estado como chips (si está disponible)
+    let estado="—";
+    try{ if(typeof A.ui?.stateForKg==="function") estado = A.ui.stateForKg(kg,endISO()) || "—"; }catch(e){}
+
+    return {p, kg, d_br, d_fdn, delta, d_aj, estado};
+  }
+
+  // -------- Render tabla --------
+  function renderTable(){
+    const tbody = $("#m216-tab tbody"); if(!tbody) return;
+    const UA = Number($("#m216-ua")?.value||0);
+    const all = Object.keys(D.areaHaByPot||{}).filter(p=>!/^z/i.test(p));
+    const rows = all.map(p=>computeRow(p,UA));
+
+    // top sugeridos primero
+    const top = [...rows].sort((a,b)=>b.kg-a.kg).slice(0,12).map(r=>r.p);
+    rows.sort((a,b)=>{
+      const ai=top.indexOf(a.p), bi=top.indexOf(b.p);
+      if (ai>=0 && bi<0) return -1;
+      if (bi>=0 && ai<0) return  1;
+      return a.p.localeCompare(b.p);
+    });
+
+    const fmt=(x,d=1)=> (isFinite(x)? x.toFixed(d) : "—");
+    tbody.innerHTML = rows.map(r=>`
+      <tr>
+        <td>${r.p}</td>
+        <td class="text-end">${fmt(r.kg,3)}</td>
+        <td class="text-end">${fmt(r.d_br,1)}</td>
+        <td class="text-end">${fmt(r.d_fdn,1)}</td>
+        <td class="text-end">${fmt(r.delta,1)}</td>
+        <td class="text-end"><strong>${fmt(r.d_aj,1)}</strong></td>
+        <td>${r.estado}</td>
+      </tr>
+    `).join("");
+  }
+
+  // -------- Wire & boot --------
+  function boot(){
+    const panel = ensurePanel(); if(!panel) return;
+    fillOrigen(); fillDestino();
+    $("#m216-recalc")?.addEventListener("click", renderTable);
+    $("#m216-clear") ?.addEventListener("click", ()=>{ $("#m216-ua").value=""; $("#m216-pvkg").value=""; renderTable(); });
+
+    // re-render cuando cambian fecha/fuente (por si el core actualiza S)
+    ["#date-end","#fuente","#source"].forEach(sel=>{
+      const el=$(sel); if(!el) return;
+      el.addEventListener("change",()=>{ fillDestino(); renderTable(); });
+    });
+    renderTable();
+    console.log("[M2.16] listo — fuente:", fuenteMode(), "hasta:", endISO());
+  }
+
+  // arranque
+  if (document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot, {once:true});
+  else boot();
 })();
