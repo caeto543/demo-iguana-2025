@@ -1,9 +1,8 @@
-/* PV6 M2.7 — Pastoreo con manejo (PV6)
-   - MOV explícito: PV6.data.movRows con keys: name_canon, date, UA_total, PV_total_kg, N_total, DSL, ocupado
-   - Si no hay ocupados a la fecha, retrocede a última fecha con ocupados y actualiza #date-end visible.
-   - Anclaje: antes de “Simular pastoreo (sin manejo)”; si no existe, usa #pv6-m2-slot / panel derecho / debajo del mapa.
-   - Inputs: UA / PV (kg) / N (excluyentes). Botón Recalcular sugeridos.
-   - Tabla: Kg, Días br., Días FDN, φ(D), Días aj., Estado. Usa PV6.computeDays si está (parche M3).
+/* PV6 M2.8 — Pastoreo con manejo (PV6)
+   Fixes:
+   - Origen (ocupados): +fallback DOM que lee chips “Ocupados (X)”.
+   - Tabla: lectura flexible de M3 -> {d0, dfdn|fdnDays|daysFdn, phi|phiD|wastePhi, dadj|daysAdj}.
+   - Destino: oculta “hijos Z” (nombre inicia con Z o contiene _z / -z).
 */
 (function(){
   "use strict";
@@ -71,7 +70,7 @@
     card.innerHTML = `
       <div class="row" style="align-items:center; gap:8px;">
         <h3 class="title">Pastoreo con manejo (PV6)</h3>
-        <span class="badge">M2.7</span>
+        <span class="badge">M2.8</span>
         <span id="pv6-m2-note"></span>
         <div style="flex:1 1 auto;"></div>
         <button id="pv6-m2-btn-recalc" class="btn">Recalcular sugeridos</button>
@@ -172,13 +171,13 @@
       const keys = Object.keys(series).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
       if (!keys.length) return Number(series) || null;
       const d0 = dateISO || PV6.state?.end || keys[keys.length-1];
-      const idx = keys.findIndex(k=>k>=d0);
-      const pick = (idx<0) ? keys[keys.length-1] : (keys[idx]===d0 ? d0 : keys[Math.max(0,idx-1)]);
+      const i  = keys.findIndex(k=>k>=d0);
+      const pick = (i<0) ? keys[keys.length-1] : (keys[i]===d0 ? d0 : keys[Math.max(0,i-1)]);
       return Number(series[pick]) || null;
     }catch(e){ return null; }
   }
 
-  // ---------- MOV explícito (según tu consola) ----------
+  // ---------- MOV explícito ----------
   function getMovRows(){
     const D = PV6.data || {};
     return Array.isArray(D.movRows) ? D.movRows : [];
@@ -204,6 +203,21 @@
     return best;
   }
 
+  // ---------- DOM chips fallback ----------
+  function domOcupados(){
+    const blocks = $$("body *").filter(el=> /\bOcupados\s*\(\d+\)/i.test(el.textContent||""));
+    const set = new Set();
+    for (const b of blocks){
+      $$("a,button,span,div", b).forEach(e=>{
+        const t=(e.textContent||"").trim();
+        // chip típico: "G15 △ 2.331"
+        const m=/^([A-Za-z0-9_]+)\b/.exec(t);
+        if (m) set.add(m[1]);
+      });
+    }
+    return Array.from(set);
+  }
+
   // ---------- ocupados ----------
   function ocupadosAFecha(endISO, idxes){
     // helpers app primero
@@ -225,6 +239,10 @@
       const out = []; for (const k in occMap){ if (occMap[k]) out.push(k); }
       if (out.length) return out.sort();
     }
+    // chips del DOM (nuevo)
+    const chips = domOcupados();
+    if (chips.length) return chips.sort();
+
     // MOV explícito (UA>0 u occ=1 en última fila ≤ fecha)
     const out=[];
     const pots = allPots();
@@ -235,6 +253,13 @@
       if (ua>0) out.push(p);
     }
     return out.sort();
+  }
+
+  // ---------- filtros de nombre ----------
+  function isChildZ(name){
+    // heurística conservadora: inicia con Z* o contiene _z / -z (case-insensitive)
+    const s=String(name||"");
+    return /^z/i.test(s) || /[_-]z/i.test(s);
   }
 
   // ---------- selectores ----------
@@ -274,7 +299,7 @@
     selD.appendChild(op0);
 
     const endISO = ctx.dateEnd;
-    const pots = allPots();
+    const pots = allPots().filter(nm=> !isChildZ(nm)); // <— oculta hijos Z
     pots.forEach(nm=>{
       const kg = kgForPotNow(nm, endISO);
       const st = (kg!=null) ? classify(kg, endISO) : "";
@@ -308,6 +333,14 @@
   }
 
   // ---------- tabla ----------
+  function mapDaysObj(obj){
+    // acepta claves alternativas del parche M3
+    const d0   = obj?.d0 ?? obj?.d_bruto ?? obj?.days ?? 0;
+    const dfdn = obj?.dfdn ?? obj?.fdnDays ?? obj?.daysFdn ?? 0;
+    const phi  = obj?.phi  ?? obj?.phiD    ?? obj?.wastePhi ?? 1;
+    const dadj = obj?.dadj ?? obj?.daysAdj ?? obj?.d_aj     ?? (dfdn*phi || d0);
+    return {d0, dfdn, phi, dadj};
+  }
   function renderTable(ctx, uaOverride){
     const tb = $('#pv6-m2-tab tbody');
     if(!tb) return;
@@ -323,7 +356,7 @@
       let d = {d0:0, dfdn:0, phi:1, dadj:0};
       try{
         if (typeof PV6.computeDays === "function"){
-          d = PV6.computeDays(nm, endISO, uaOverride||0); // {d0, dfdn, phi, dadj}
+          d = mapDaysObj( PV6.computeDays(nm, endISO, uaOverride||0) );
         }else{
           const area = PV6.data?.areaHaByPot?.[nm] || 0;
           const uso  = (PV6.state?.coefUso ?? 60)/100;
@@ -390,14 +423,14 @@
     renderTable(ctx, 0);
     wire(ctx);
 
-    console.log("[M2.7] lista — movRows=", rows.length, "fechas=", idx.dates.length);
+    console.log("[M2.8] listo — movRows=", rows.length, "fechas=", idx.dates.length);
   }
 
   if (PV6.onDataReady && typeof PV6.onDataReady === "function"){
     const prev = PV6.onDataReady.bind(PV6);
     PV6.onDataReady = function(){
       try{ prev(); }catch(e){}
-      try{ init(); }catch(e){ console.warn("[M2.7] init warn:", e); }
+      try{ init(); }catch(e){ console.warn("[M2.8] init warn:", e); }
     };
   }else{
     document.addEventListener('DOMContentLoaded', ()=>setTimeout(init, 400), {once:true});
