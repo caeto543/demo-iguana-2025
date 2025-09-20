@@ -233,7 +233,7 @@
 <!-- REGISTRO SW (nuevo) -->
 <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw_mov_remote.js?ver=1").then(() => {
+      navigator.serviceWorker.register("./sw_mov_remote.js?ver=3").then(() => {
         console.log("[MOV][sw] registrado");
       }).catch(e => console.warn("[MOV][sw] error registro", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
