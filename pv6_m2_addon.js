@@ -1,13 +1,11 @@
-/* PV6 M2.4 — Pastoreo con manejo (PV6)
-   - Origen: SOLO ocupados a la fecha-hasta (busca en helpers de la app y, si no, en MOV).
-   - Destino: salida de finca + todos los potreros (marca estado).
+/* PV6 M2.5 — Pastoreo con manejo (PV6)
+   - Fija el anclaje para no desordenar el layout.
+   - Detecta ocupados desde helpers de PV6, chips del DOM o MOV (última fila ≤ fecha).
    - Tabla con trazas: Kg, Días br., Días FDN, φ(D), Días aj., Estado.
-   - Usa PV6.computeDays (parche M3). Si no existe, cae a cálculo simple.
 */
 (function(){
   "use strict";
 
-  // -------------------- atajos y utils --------------------
   const PV6 = (window.PV6 = window.PV6 || {});
   const ST  = (PV6.state = PV6.state || {});
   const $   = (s, r=document)=>r.querySelector(s);
@@ -15,8 +13,8 @@
   const fmt1= v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(1);
   const fmt2= v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(2);
   const fmt3= v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(3);
-  const nf0 = n=> new Intl.NumberFormat("es-CO",{maximumFractionDigits:0}).format(n);
 
+  // ---------- util ----------
   function toISO(s){
     if (!s) return null;
     const str=String(s).trim();
@@ -25,7 +23,6 @@
     if (m){ const d=m[1].padStart(2,"0"), M=m[2].padStart(2,"0"), y=m[3]; return `${y}-${M}-${d}`; }
     const dt=new Date(str); return isNaN(dt)?str:dt.toISOString().slice(0,10);
   }
-
   function ensureStyles(){
     if ($('#pv6-m2-styles')) return;
     const st = document.createElement('style');
@@ -49,21 +46,29 @@
     document.head.appendChild(st);
   }
 
-  // -------------------- UI principal --------------------
+  // ---------- anclaje ----------
+  function resolveAnchor(){
+    return (
+      $('#pv6-m2-slot') ||
+      $('#panel-derecho') || $('#right-panel') || $('.col-right') || $('#sidebar') ||
+      // último recurso: debajo del mapa (no recomendado, pero no rompe)
+      ($('#map')?.parentNode || document.body)
+    );
+  }
   function ensureCard(){
     let card = $('#pv6-m2-card');
     if (card) return card;
+    const host = resolveAnchor();
     card = document.createElement('div');
     card.id = 'pv6-m2-card';
     card.innerHTML = `
       <div class="row" style="align-items:center; gap:8px;">
         <h3 class="title">Pastoreo con manejo (PV6)</h3>
-        <span class="badge">M2.4</span>
+        <span class="badge">M2.5</span>
         <div style="flex:1 1 auto;"></div>
         <button id="pv6-m2-btn-recalc" class="btn">Recalcular sugeridos</button>
         <button id="pv6-m2-btn-clear" class="btn btn-light">Limpiar</button>
       </div>
-
       <div class="row" style="margin-top:10px;">
         <div class="col">
           <label>Origen (ocupados)</label>
@@ -74,7 +79,6 @@
           <select id="pv6-m2-dest" class="inp"></select>
         </div>
       </div>
-
       <div style="overflow:auto; margin-top:10px; max-height:360px;">
         <table id="pv6-m2-tab" class="tbl">
           <thead>
@@ -91,17 +95,22 @@
           <tbody></tbody>
         </table>
       </div>
-
       <div id="pv6-m2-tip" style="margin-top:6px">
         Tip: Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.
       </div>
     `;
-    const anchor = document.querySelector('#map') || document.querySelector('#mapa') || document.body;
-    anchor.parentNode.insertBefore(card, anchor.nextSibling);
+    // Inserta
+    if (host === ($('#map')?.parentNode || document.body)) {
+      const map = $('#map');
+      if (map && map.parentNode) map.parentNode.insertBefore(card, map.nextSibling);
+      else host.appendChild(card);
+    } else {
+      host.appendChild(card);
+    }
     return card;
   }
 
-  // -------------------- data helpers --------------------
+  // ---------- helpers data ----------
   function classify(kg, dateISO){
     try{
       if (PV6.ui && typeof PV6.ui.stateForKg === "function") return PV6.ui.stateForKg(kg, dateISO);
@@ -109,19 +118,16 @@
     }catch(e){}
     return "";
   }
-
   function allPots(){
     if (PV6.allPots && typeof PV6.allPots==="function") return PV6.allPots();
     const byArea = PV6.data?.areaHaByPot || {};
     return Object.keys(byArea).sort();
   }
-
   function kgForPotNow(pot, dateISO){
     try{
       if (typeof PV6.kgForPot === "function") return PV6.kgForPot(pot, dateISO);
       if (PV6.ui && typeof PV6.ui.kgForPot === "function") return PV6.ui.kgForPot(pot, dateISO);
     }catch(e){}
-    // Fallback a mapas
     try{
       const D = PV6.data || {};
       const src = (PV6.state?.fuente||"kgms_7d").toLowerCase().includes("raw") ? "kgms_raw" : "kgms_7d";
@@ -137,55 +143,57 @@
     }catch(e){ return null; }
   }
 
-  // ---- MOV: detección robusta de filas y construcción de índices ----
+  // MOV access
   function getMovRows(){
     const D = PV6.data || {};
-    return (
-      D.movRows || D.mov_rows || D.MOV || PV6.movRows || PV6.mov_rows || PV6.MOV || []
-    );
+    return ( D.movRows || D.mov_rows || D.MOV || PV6.movRows || PV6.mov_rows || PV6.MOV || [] );
   }
-
-  function buildIndexes(rows){
+  function toIndex(rows){
     const uaIdx={}, occIdx={};
     if(!Array.isArray(rows)||!rows.length) return {uaIdx,occIdx};
     const norm = s=>String(s??"").trim().toLowerCase();
-    const sample=rows.find(r=>r && Object.keys(r).length); if(!sample) return {uaIdx,occIdx};
-
-    const pickCol = (names)=>{
-      const want=new Set(names.map(norm));
-      for (const k of Object.keys(sample)) if (want.has(norm(k))) return k;
-      return null;
-    };
-
-    const kDate = pickCol(["fecha","date","dia"]) || "date";
-    const kPot  = pickCol(["name_canon","potrero","name","padre"]) || "name_canon";
-    const kUA   = pickCol(["UA_total","ua_total","UA","ua","N_total","n_total","N","n"]) || "UA_total";
-    const kOcc  = pickCol(["ocupado","occ","occupied"]) || "ocupado";
-
+    const sample=rows.find(r=>r && Object.keys(r).length);
+    const pick=(names)=>{ const want=new Set(names.map(norm)); for (const k of Object.keys(sample||{})) if (want.has(norm(k))) return k; return null; };
+    const kDate=pick(["fecha","date","dia"])||"date";
+    const kPot =pick(["name_canon","potrero","name","padre"])||"name_canon";
+    const kUA  =pick(["UA_total","ua_total","UA","ua","N_total","n_total","N","n"])||"UA_total";
+    const kOcc =pick(["ocupado","occ","occupied"])||"ocupado";
     const sorted=[...rows].map(r=>({
       date: toISO(r[kDate]),
       pot : String(r[kPot]??"").trim(),
       ua  : Number(r[kUA] ?? 0) || 0,
-      occ : (r[kOcc]===undefined || r[kOcc]===null || r[kOcc]==="") ? null
-            : (Number(r[kOcc])>0?1:0)
+      occ : (r[kOcc]===undefined || r[kOcc]===null || r[kOcc]==="") ? null : (Number(r[kOcc])>0?1:0)
     })).filter(r=>r.pot && r.date).sort((a,b)=>a.date.localeCompare(b.date));
-
     for(const r of sorted){
       (uaIdx [r.pot] ||= {})[r.date]=r.ua;
       (occIdx[r.pot] ||= {})[r.date]=r.occ;
     }
     return {uaIdx,occIdx};
   }
-
   function lastOnOrBefore(idx,pot,dateISO,def=0){
     const recs=idx?.[pot]; if(!recs) return def; let best=def, bd="";
     for(const d in recs){ const iso=toISO(d); if(iso && iso<=dateISO && iso>=bd){ best=recs[d]; bd=iso; } }
     return best;
   }
 
-  // ---- ocupados a la fecha: intenta helpers de la app, sino índices de MOV ----
+  // ---- chips desde DOM (“Ocupados (X) ...”) ----
+  function domOcupados(){
+    // busca bloques que contengan “Ocupados (”
+    const blocks = $$("body *").filter(el=>{
+      const t=el.textContent||""; return /\bOcupados\s*\(\d+\)/i.test(t);
+    });
+    for (const b of blocks){
+      // chips típicos: a/span/button con id de potrero al comienzo
+      const chips = $$("a,button,span", b).map(e=> (e.textContent||"").trim() );
+      const pots = chips.map(t=>t.replace(/[\s△⚠️·].*$/,"")).filter(t=>/^[A-Za-z0-9_]+$/.test(t));
+      if (pots.length) return Array.from(new Set(pots));
+    }
+    return [];
+  }
+
+  // ocupados a fecha (orden de preferencia)
   function ocupadosAFecha(endISO, idxes){
-    // 1) helpers directos de la app
+    // 1) helpers app
     const tryFns = [
       PV6.ui?.ocupadosAt, PV6.ocupadosAt,
       PV6.ui?.ocupadosNow, PV6.ocupadosNow,
@@ -198,30 +206,27 @@
         if (Array.isArray(r) && r.length) return r.slice().map(String);
       }catch(e){}
     }
-
-    // 2) mapas de ocupación de la app (si existieran)
+    // 2) mapa booleano
     const occMap = PV6.state?.occByPot || PV6.ui?.occByPot || null;
     if (occMap){
-      const out = [];
-      for (const k in occMap){ if (occMap[k]) out.push(k); }
+      const out = []; for (const k in occMap){ if (occMap[k]) out.push(k); }
       if (out.length) return out.sort();
     }
-
-    // 3) índices desde MOV
-    const uaIndex  = idxes.uaIndex || {};
-    const occIndex = idxes.occIndex || {};
-    const pots = allPots();
+    // 3) chips del DOM
+    const fromDom = domOcupados();
+    if (fromDom.length) return fromDom.sort();
+    // 4) MOV (UA>0 u occ=1 en última fila ≤ fecha)
     const out=[];
+    const pots = allPots();
     for (const p of pots){
-      const occ = lastOnOrBefore(occIndex, p, endISO, null);
+      const occ = lastOnOrBefore(idxes.occIndex, p, endISO, null);
       if (occ!==null){ if (Number(occ)>0) out.push(p); continue; }
-      const ua  = lastOnOrBefore(uaIndex , p, endISO, 0);
+      const ua  = lastOnOrBefore(idxes.uaIndex , p, endISO, 0);
       if (ua>0) out.push(p);
     }
     return out.sort();
   }
 
-  // ---- util: todas las fechas con movimiento (para autocorrección si vacío) ----
   function allMoveDates(idxes){
     const S=new Set(); const ui=idxes.uaIndex||{}, oi=idxes.occIndex||{};
     for(const p in ui) for(const d in ui[p]) S.add(toISO(d));
@@ -229,21 +234,20 @@
     return Array.from(S).filter(Boolean).sort();
   }
 
-  // -------------------- selectores --------------------
+  // ---------- selectores ----------
   function fillSelectors(ctx){
     const selO = $('#pv6-m2-origen'), selD = $('#pv6-m2-dest');
     if(!selO || !selD) return;
     selO.innerHTML=""; selD.innerHTML="";
 
-    // Origen
     let origenes = ocupadosAFecha(ctx.dateEnd, ctx.idx);
     if (!origenes.length){
-      // autocorrección: retroceder a la última fecha con ocupados
+      // retrocede a última fecha con ocupados (no cambia KPI, solo el combo)
       const dates = allMoveDates(ctx.idx);
       for(let i=dates.length-1;i>=0;i--){
         const dd = dates[i];
         const o2 = ocupadosAFecha(dd, ctx.idx);
-        if (o2.length){ ctx.dateEnd = dd; const inp=$('#date-end'); if(inp) inp.value=dd; origenes=o2; break; }
+        if (o2.length){ origenes=o2; break; }
       }
     }
     if(!origenes.length){
@@ -256,7 +260,6 @@
       });
     }
 
-    // Destino
     const op0=document.createElement('option');
     op0.value="__NONE__"; op0.textContent="— Ningún potrero (salida de finca) —";
     selD.appendChild(op0);
@@ -272,7 +275,7 @@
     });
   }
 
-  // -------------------- tabla --------------------
+  // ---------- tabla ----------
   function renderTable(ctx, uaOverride){
     const tb = $('#pv6-m2-tab tbody');
     if(!tb) return;
@@ -290,7 +293,7 @@
         if (typeof PV6.computeDays === "function"){
           d = PV6.computeDays(nm, endISO, uaOverride||0);
         }else{
-          // fallback mínimo si faltara el parche M3
+          // fallback neutral
           const area = PV6.data?.areaHaByPot?.[nm] || 0;
           const uso  = (PV6.state?.coefUso ?? 60)/100;
           const cons = PV6.state?.consumo ?? 10;
@@ -298,7 +301,7 @@
           const D0   = (kg && area && dem) ? (kg*area*uso/dem) : 0;
           d = {d0:D0, dfdn:D0, phi:1, dadj:D0};
         }
-      }catch(e){ /* noop */ }
+      }catch(e){ /*noop*/ }
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -314,31 +317,30 @@
     }
   }
 
-  // -------------------- eventos --------------------
+  // ---------- eventos ----------
   function wire(ctx){
     $('#pv6-m2-btn-recalc')?.addEventListener('click', ()=>{
-      const inpUA = document.getElementById('pv6-ua-input'); // si tu app lo tiene
+      const inpUA = document.getElementById('pv6-ua-input'); // si existe
       const UA = inpUA ? Number(inpUA.value||0) : 0;
       renderTable(ctx, UA);
     });
+    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=> renderTable(ctx, 0));
 
-    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{
-      renderTable(ctx, 0);
-    });
-
-    // re-render por cambios de fecha/fuente
     const end=document.getElementById("date-end");
-    if (end) end.addEventListener("change", ()=>{ ctx.dateEnd = toISO(end.value); fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0); });
+    if (end) end.addEventListener("change", ()=>{
+      ctx.dateEnd = toISO(end.value);
+      fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0);
+    });
     ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
       const el=document.getElementById(id);
-      if(el && el.tagName==="SELECT") el.addEventListener("change", ()=>{ fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0); });
+      if(el && el.tagName==="SELECT")
+        el.addEventListener("change", ()=>{ fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0); });
     });
   }
 
-  // -------------------- init --------------------
+  // ---------- init ----------
   function init(){
-    ensureStyles();
-    ensureCard();
+    ensureStyles(); const card=ensureCard();
 
     const ctx = {
       dateEnd: toISO(PV6.state?.end || $('#date-end')?.value || "2025-12-31"),
@@ -346,25 +348,20 @@
       idx: { uaIndex:{}, occIndex:{} }
     };
 
-    // construir índices a partir de MOV (robusto)
-    try{
-      const rows = getMovRows();
-      ctx.idx = buildIndexes(rows);
-    }catch(e){ ctx.idx = {uaIndex:{},occIndex:{}}; }
+    try{ ctx.idx = toIndex(getMovRows()); }catch(e){ ctx.idx = {uaIndex:{},occIndex:{}}; }
 
     fillSelectors(ctx);
     renderTable(ctx, 0);
     wire(ctx);
 
-    console.log("[M2.4] UI con trazas Dbr/Dfdn/φ/Daj lista.");
+    console.log("[M2.5] UI con trazas Dbr/Dfdn/φ/Daj lista (anclaje seguro).");
   }
 
-  // arrancar cuando haya datos
   if (PV6.onDataReady && typeof PV6.onDataReady === "function"){
     const prev = PV6.onDataReady.bind(PV6);
     PV6.onDataReady = function(){
       try{ prev(); }catch(e){}
-      try{ init(); }catch(e){ console.warn("[M2.4] init warn:", e); }
+      try{ init(); }catch(e){ console.warn("[M2.5] init warn:", e); }
     };
   }else{
     document.addEventListener('DOMContentLoaded', ()=>setTimeout(init, 400), {once:true});
