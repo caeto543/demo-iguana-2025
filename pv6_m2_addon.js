@@ -1,7 +1,8 @@
-/* PV6 M2.6 — Pastoreo con manejo (PV6)
+/* PV6 M2.7 — Pastoreo con manejo (PV6)
    - MOV explícito: PV6.data.movRows con keys: name_canon, date, UA_total, PV_total_kg, N_total, DSL, ocupado
    - Si no hay ocupados a la fecha, retrocede a última fecha con ocupados y actualiza #date-end visible.
    - Anclaje: antes de “Simular pastoreo (sin manejo)”; si no existe, usa #pv6-m2-slot / panel derecho / debajo del mapa.
+   - Inputs: UA / PV (kg) / N (excluyentes). Botón Recalcular sugeridos.
    - Tabla: Kg, Días br., Días FDN, φ(D), Días aj., Estado. Usa PV6.computeDays si está (parche M3).
 */
 (function(){
@@ -32,7 +33,7 @@
     st.textContent = `
       #pv6-m2-card{ background:#fff; border:1px solid #eee; border-radius:12px; padding:12px; box-shadow:0 1px 3px rgba(0,0,0,.06); margin-top:12px;}
       #pv6-m2-card .row{ display:flex; gap:10px; flex-wrap:wrap;}
-      #pv6-m2-card .col{ flex:1 1 240px; min-width:240px;}
+      #pv6-m2-card .col{ flex:1 1 240px; min-width:220px;}
       #pv6-m2-card .title{ font-size:16px; margin:0; font-weight:600;}
       #pv6-m2-card .badge{ font-size:12px; background:#eef3ff; color:#335; padding:2px 6px; border-radius:8px;}
       #pv6-m2-card .btn{ padding:6px 10px; border-radius:8px; border:1px solid #ddd; background:#f7f7f7; cursor:pointer;}
@@ -45,20 +46,19 @@
       #pv6-m2-card .tbl tbody td{ padding:6px 8px; text-align:right; border-bottom:1px solid #f2f2f2;}
       #pv6-m2-tip{ color:#666; font-size:12px;}
       #pv6-m2-note{ font-size:12px; color:#555; margin-left:8px;}
+      #pv6-m2-grid{ display:grid; grid-template-columns:repeat(3,minmax(110px,1fr)); gap:8px; }
+      #pv6-m2-grid label{ font-size:12px; color:#444; }
     `;
     document.head.appendChild(st);
   }
 
   // ---------- anclaje controlado ----------
   function resolveAnchor(){
-    // 1) Antes de “Simular pastoreo (sin manejo)”
     const sim = [...document.querySelectorAll("h1,h2,h3,h4,strong")]
       .find(h => /Simular pastoreo\s*\(sin manejo\)/i.test(h.textContent||""));
     if (sim && sim.parentNode) return {node: sim.parentNode, mode: "before"};
-    // 2) slot / panel derecho
     const right = $('#pv6-m2-slot') || $('#panel-derecho') || $('#right-panel') || $('.col-right') || $('#sidebar');
     if (right) return {node: right, mode: "append"};
-    // 3) debajo del mapa (fallback)
     const mapWrapper = $('#map')?.parentNode || document.body;
     return {node: mapWrapper, mode: "afterMap"};
   }
@@ -71,12 +71,13 @@
     card.innerHTML = `
       <div class="row" style="align-items:center; gap:8px;">
         <h3 class="title">Pastoreo con manejo (PV6)</h3>
-        <span class="badge">M2.6</span>
+        <span class="badge">M2.7</span>
         <span id="pv6-m2-note"></span>
         <div style="flex:1 1 auto;"></div>
         <button id="pv6-m2-btn-recalc" class="btn">Recalcular sugeridos</button>
         <button id="pv6-m2-btn-clear" class="btn btn-light">Limpiar</button>
       </div>
+
       <div class="row" style="margin-top:10px;">
         <div class="col">
           <label>Origen (ocupados)</label>
@@ -86,7 +87,38 @@
           <label>Destino</label>
           <select id="pv6-m2-dest" class="inp"></select>
         </div>
+        <div class="col">
+          <label>Modo manejo</label>
+          <select id="pv6-m2-mode" class="inp">
+            <option value="eq">Equilibrado</option>
+            <option value="gain">Ganar peso</option>
+            <option value="etico">Ético</option>
+          </select>
+        </div>
       </div>
+
+      <div class="row" style="margin-top:8px;">
+        <div class="col">
+          <div id="pv6-m2-grid">
+            <div>
+              <label>UA</label>
+              <input id="pv6-ua" class="inp" type="number" step="1" min="0" placeholder="p.ej. 180">
+            </div>
+            <div>
+              <label>PV total (kg)</label>
+              <input id="pv6-pvkg" class="inp" type="number" step="1" min="0" placeholder="p.ej. 81000">
+            </div>
+            <div>
+              <label>N total</label>
+              <input id="pv6-n" class="inp" type="number" step="1" min="0" placeholder="p.ej. 300">
+            </div>
+          </div>
+          <div id="pv6-m2-tip" style="margin-top:6px">
+            Tip: UA ↔ PV/N son excluyentes. Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.
+          </div>
+        </div>
+      </div>
+
       <div style="overflow:auto; margin-top:10px; max-height:360px;">
         <table id="pv6-m2-tab" class="tbl">
           <thead>
@@ -102,9 +134,6 @@
           </thead>
           <tbody></tbody>
         </table>
-      </div>
-      <div id="pv6-m2-tip" style="margin-top:6px">
-        Tip: Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.
       </div>
     `;
     if (mode==="before") node.parentNode.insertBefore(card, node);
@@ -136,9 +165,9 @@
     }catch(e){}
     try{
       const D = PV6.data || {};
-      const src = (PV6.state?.fuente||"kgms_7d").toLowerCase().includes("raw") ? "kgmsRaw" : "kgms7d";
-      const map = D[src+"ByPot"] || D[src] || D[(src==="kgmsRaw"?"kg_by_pot":"kgms_by_pot")] || {};
-      const series = map[pot];
+      const raw = (PV6.state?.fuente||"kgms_7d").toLowerCase().includes("raw");
+      const map = raw ? (D.kgmsRawByPot || D.kg_by_pot) : (D.kgms7dByPot || D.kgms_by_pot);
+      const series = map?.[pot];
       if (!series) return null;
       const keys = Object.keys(series).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
       if (!keys.length) return Number(series) || null;
@@ -152,11 +181,10 @@
   // ---------- MOV explícito (según tu consola) ----------
   function getMovRows(){
     const D = PV6.data || {};
-    const arr = Array.isArray(D.movRows) ? D.movRows : [];
-    return arr;
+    return Array.isArray(D.movRows) ? D.movRows : [];
   }
   function buildIndexesFromMov(rows){
-    const uaIdx={}, occIdx={};
+    const uaIdx={}, occIdx={}, datesSet=new Set();
     const sorted=[...rows].map(r=>({
       date: toISO(r.date),
       pot : String(r.name_canon??"").trim(),
@@ -166,9 +194,9 @@
     for(const r of sorted){
       (uaIdx [r.pot] ||= {})[r.date]=r.ua;
       (occIdx[r.pot] ||= {})[r.date]=r.occ;
+      datesSet.add(r.date);
     }
-    const dates = Array.from(new Set(sorted.map(r=>r.date))).sort();
-    return {uaIdx, occIdx, dates};
+    return {uaIdx, occIdx, dates: Array.from(datesSet).sort()};
   }
   function lastOnOrBefore(idx,pot,dateISO,def=0){
     const recs=idx?.[pot]; if(!recs) return def; let best=def, bd="";
@@ -197,7 +225,7 @@
       const out = []; for (const k in occMap){ if (occMap[k]) out.push(k); }
       if (out.length) return out.sort();
     }
-    // MOV explícito
+    // MOV explícito (UA>0 u occ=1 en última fila ≤ fecha)
     const out=[];
     const pots = allPots();
     for (const p of pots){
@@ -219,7 +247,6 @@
 
     let origenes = ocupadosAFecha(ctx.dateEnd, ctx.idx);
     if (!origenes.length){
-      // retroceder a última fecha con ocupados Y reflejarlo en UI
       for(let i=ctx.idx.dates.length-1;i>=0;i--){
         const dd = ctx.idx.dates[i];
         const o2 = ocupadosAFecha(dd, ctx.idx);
@@ -257,6 +284,29 @@
     });
   }
 
+  // ---------- UI entradas ----------
+  function currentUAOverride(){
+    const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450) || 450;
+    const UA = Number($('#pv6-ua')?.value || 0);
+    const PVkg = Number($('#pv6-pvkg')?.value || 0);
+    const N = Number($('#pv6-n')?.value || 0);
+    if (UA>0){ return {UA, lock:"ua"}; }
+    if (PVkg>0){ return {UA: PVkg/auKg, lock:"pv"}; }
+    if (N>0){ return {UA: N, lock:"n"}; }
+    return {UA:0, lock:null};
+  }
+  function wireInputs(){
+    const ua=$('#pv6-ua'), pv=$('#pv6-pvkg'), n=$('#pv6-n');
+    function sync(){
+      const {lock} = currentUAOverride();
+      ua.disabled = (lock && lock!=="ua");
+      pv.disabled = (lock && lock!=="pv");
+      n.disabled  = (lock && lock!=="n");
+    }
+    [ua,pv,n].forEach(el=> el && el.addEventListener('input', sync));
+    sync();
+  }
+
   // ---------- tabla ----------
   function renderTable(ctx, uaOverride){
     const tb = $('#pv6-m2-tab tbody');
@@ -273,7 +323,7 @@
       let d = {d0:0, dfdn:0, phi:1, dadj:0};
       try{
         if (typeof PV6.computeDays === "function"){
-          d = PV6.computeDays(nm, endISO, uaOverride||0);
+          d = PV6.computeDays(nm, endISO, uaOverride||0); // {d0, dfdn, phi, dadj}
         }else{
           const area = PV6.data?.areaHaByPot?.[nm] || 0;
           const uso  = (PV6.state?.coefUso ?? 60)/100;
@@ -301,21 +351,24 @@
   // ---------- eventos ----------
   function wire(ctx){
     $('#pv6-m2-btn-recalc')?.addEventListener('click', ()=>{
-      const inpUA = document.getElementById('pv6-ua-input'); // si existe en tu app
-      const UA = inpUA ? Number(inpUA.value||0) : 0;
+      const {UA} = currentUAOverride();
       renderTable(ctx, UA);
     });
-    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=> renderTable(ctx, 0));
+    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{
+      ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; });
+      wireInputs();
+      renderTable(ctx, 0);
+    });
 
     const end=document.getElementById("date-end");
     if (end) end.addEventListener("change", ()=>{
       ctx.dateEnd = toISO(end.value);
-      fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0);
+      fillSelectors(ctx); renderTable(ctx, currentUAOverride().UA);
     });
     ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
       const el=document.getElementById(id);
       if(el && el.tagName==="SELECT")
-        el.addEventListener("change", ()=>{ fillSelectors(ctx); renderTable(ctx, ctx.uaOverride||0); });
+        el.addEventListener("change", ()=>{ fillSelectors(ctx); renderTable(ctx, currentUAOverride().UA); });
     });
   }
 
@@ -323,8 +376,8 @@
   function init(){
     ensureStyles(); ensureCard();
 
-    const rows = getMovRows();                     // <- movRows explícito
-    const idx  = buildIndexesFromMov(rows);        // {uaIndex, occIndex, dates}
+    const rows = getMovRows();
+    const idx  = buildIndexesFromMov(rows);
 
     const ctx = {
       dateEnd: toISO(PV6.state?.end || $('#date-end')?.value || (idx.dates[idx.dates.length-1] || "2025-12-31")),
@@ -333,17 +386,18 @@
     };
 
     fillSelectors(ctx);
+    wireInputs();
     renderTable(ctx, 0);
     wire(ctx);
 
-    console.log("[M2.6] UI con trazas Dbr/Dfdn/φ/Daj lista (MOV explícito + anclaje controlado).");
+    console.log("[M2.7] lista — movRows=", rows.length, "fechas=", idx.dates.length);
   }
 
   if (PV6.onDataReady && typeof PV6.onDataReady === "function"){
     const prev = PV6.onDataReady.bind(PV6);
     PV6.onDataReady = function(){
       try{ prev(); }catch(e){}
-      try{ init(); }catch(e){ console.warn("[M2.6] init warn:", e); }
+      try{ init(); }catch(e){ console.warn("[M2.7] init warn:", e); }
     };
   }else{
     document.addEventListener('DOMContentLoaded', ()=>setTimeout(init, 400), {once:true});
