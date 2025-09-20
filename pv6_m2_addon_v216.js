@@ -1,17 +1,18 @@
-/* PV6 M2.16 — Pastoreo con manejo (estable)
+/* PV6 M2.16 — Pastoreo con manejo (estable, con API y logs)
    - Origen (ocupados) desde PV6.data.movRows
    - Destino: Ninguno + Sugeridos (top Kg) + Todos (alfabético), excluye Z*
    - Tabla: Dbr / Dfdn(120/FDN) / Δdesp(d)=min(wmax,β·Dfdn) / Daj / Estado(chips)
-   - Alinéa Kg con fecha “hasta” y fuente (raw/7d)
+   - Alinea Kg con fecha “hasta” y fuente (raw/7d)
+   - Expone PV6.M216.calcDays(pot, fechaISO, {UA})
 */
 (function(){
   if (window.__PV6_M216__) return;  // evita dobles cargas
   window.__PV6_M216__ = true;
 
-  const A = window.PV6||{};
-  const D = A.data||{};
-  const S = A.state||{};
-  const $ = (s,r=document)=>r.querySelector(s);
+  (window.PV6 ||= {}); (PV6.data ||= {}); (PV6.state ||= {});
+  const A = PV6, D = PV6.data, S = PV6.state;
+
+  const $  = (s,r=document)=>r.querySelector(s);
   const $$ = (s,r=document)=>Array.from(r.querySelectorAll(s));
 
   function iso(s){
@@ -22,9 +23,7 @@
     if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
     const dt=new Date(s); return isNaN(dt)? s : dt.toISOString().slice(0,10);
   }
-  function endISO(){
-    return iso(S.end || $("#date-end")?.value);
-  }
+  function endISO(){ return iso(S.end || $("#date-end")?.value); }
   function fuenteMode(){
     const f=(S.fuente||$("#fuente")?.value||$("#source")?.value||"").toLowerCase();
     return (f.includes("raw")||f.includes("día")||f.includes("dia")) ? "kgms_raw" : "kgms_7d";
@@ -72,7 +71,7 @@
     return out.sort();
   }
 
-  // -------- Panel UI (autocreación si falta) --------
+  // -------- Panel UI --------
   function ensurePanel(){
     let panel = $("#pv6-m2");
     if(panel) return panel;
@@ -167,7 +166,7 @@
     if (v==null) return null;
     const n = Number(v);
     if(!isFinite(n)) return null;
-    return n>1? n/100 : n; // normaliza a fracción
+    return n>1? n/100 : n; // fracción
   }
   function ofertaKg(p){
     const kg = kgForPot(p)||0;
@@ -176,7 +175,7 @@
     return kg * ha * coef;
   }
 
-  // -------- Cálculos de días --------
+  // -------- Cálculos de días (API pública incluida) --------
   function computeRow(p, UA){
     const {consumo, auKg, beta, wmax} = params();
     const kg = kgForPot(p)||0;
@@ -201,6 +200,18 @@
 
     return {p, kg, d_br, d_fdn, delta, d_aj, estado};
   }
+
+  // API pública para validación rápida
+  PV6.M216 = {
+    calcDays: function(pot, fechaISO, {UA}={}){
+      try{
+        if (fechaISO) PV6.state.end = fechaISO;
+        return computeRow(pot, Number(UA||0));
+      }catch(e){
+        return {error: e.message||String(e)};
+      }
+    }
+  };
 
   // -------- Render tabla --------
   function renderTable(){
@@ -239,7 +250,6 @@
     $("#m216-recalc")?.addEventListener("click", renderTable);
     $("#m216-clear") ?.addEventListener("click", ()=>{ $("#m216-ua").value=""; $("#m216-pvkg").value=""; renderTable(); });
 
-    // re-render cuando cambian fecha/fuente (por si el core actualiza S)
     ["#date-end","#fuente","#source"].forEach(sel=>{
       const el=$(sel); if(!el) return;
       el.addEventListener("change",()=>{ fillDestino(); renderTable(); });
@@ -248,7 +258,10 @@
     console.log("[M2.16] listo — fuente:", fuenteMode(), "hasta:", endISO());
   }
 
-  // arranque
-  if (document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot, {once:true});
-  else boot();
+  try{
+    if (document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot, {once:true});
+    else boot();
+  }catch(e){
+    console.error("[M2.16] boot error:", e);
+  }
 })();
