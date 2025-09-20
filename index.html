@@ -249,5 +249,14 @@
 <script src="app.v6.js?v=V6"></script>
 <!-- ÚNICO addon estable M2.16 -->
 
-<script src="pv6_m2_addon_v216.js?v=2.2"></script></body>
+<script src="pv6_m2_addon_v216.js?v=2.2"></script><!-- Injector para pv6_m2_addon_v216_FORCE -->
+<script>
+(function(){
+  var s = document.createElement('script');
+  s.src = 'pv6_m2_addon_v216_FORCE.js?v=' + Date.now();
+  document.body.appendChild(s);
+})();
+</script>
+
+</body>
 </html>
