@@ -1,5 +1,7 @@
-/* PV6 M2.12 — Pastoreo con manejo (PV6)
-   Destino sin Z, D0 sin uso, DFDN (120/FDN), φ=1−min(wmax,β·D), Daj=DFDN·φ
+/* PV6 M2.13 — Pastoreo con manejo (PV6)
+   - Filtro Z robusto (prefijo 'z' y segmentos z*)
+   - FDN map finder dinámico en PV6.data (0–1 o 0–100)
+   - D0 sin uso; DFDN con (120/FDN%); φ(D) sobre DFDN; Daj = DFDN·φ
 */
 (function(){
   "use strict";
@@ -56,7 +58,7 @@
     card=document.createElement('div'); card.id='pv6-m2-card';
     card.innerHTML=`
       <div class="row" style="align-items:center;gap:8px">
-        <h3 class="title">Pastoreo con manejo (PV6)</h3><span class="badge">M2.12</span><span id="pv6-m2-note"></span>
+        <h3 class="title">Pastoreo con manejo (PV6)</h3><span class="badge">M2.13</span><span id="pv6-m2-note"></span>
         <div style="flex:1"></div>
         <button id="pv6-m2-btn-recalc" class="btn">Recalcular sugeridos</button>
         <button id="pv6-m2-btn-clear" class="btn">Limpiar</button>
@@ -87,7 +89,7 @@
   }
 
   // ---------- filtros / datos ----------
-  const isZ = nm => nm.split(/[_-]/).some(seg=>/^z(\d+)?$/i.test(seg));
+  const isZ = nm => /^z/i.test(nm) || nm.split(/[_-]/).some(seg=>/^z(\d+)?$/i.test(seg));
   function allPots(){
     const byArea = PV6.data?.areaHaByPot || {};
     return Object.keys(byArea).filter(nm=>!isZ(nm)).sort();
@@ -143,7 +145,7 @@
       if(ua>0) out.push(p);
     }
     if(out.length) return out.sort();
-    // Fallback DOM chips
+    // fallback DOM chips
     const blocks=[...document.querySelectorAll("body *")].filter(el=>/\bOcupados\s*\(\d+\)/i.test(el.textContent||""));
     const set=new Set(); blocks.forEach(b=>{
       b.querySelectorAll("a,button,span,div").forEach(e=>{
@@ -151,6 +153,39 @@
       });
     });
     return [...set].filter(n=>!isZ(n)).sort();
+  }
+
+  // ---------- FDN finder ----------
+  let _FDN_MAP = null;
+  function findFdnMap(){
+    if(_FDN_MAP) return _FDN_MAP;
+    const D = PV6.data || {};
+    const pots = Object.keys(D.areaHaByPot||{});
+    const dicts = Object.keys(D).filter(k=>{
+      const v=D[k]; if(!v || typeof v!=="object" || Array.isArray(v)) return false;
+      // candidato si contiene >50% de potreros y valores numéricos dentro [0..1] o [30..90]
+      const keys=Object.keys(v); if(keys.length<10) return false;
+      const inter= pots.filter(p=>p in v).length;
+      if(inter < Math.max(10, pots.length*0.5)) return false;
+      let score=0, cnt=0;
+      for(const p of pots.slice(0,30)){
+        if(!(p in v)) continue;
+        const val=Number(v[p]);
+        if(!isFinite(val)) continue;
+        if((val>0 && val<1.2) || (val>30 && val<90)) score++;
+        cnt++;
+      }
+      return cnt>5 && score>=Math.floor(cnt*0.6);
+    });
+    _FDN_MAP = dicts.length ? D[dicts[0]] : null;
+    return _FDN_MAP;
+  }
+  function getFDN(p){
+    const m = findFdnMap();
+    let v = (m && m[p] != null) ? Number(m[p]) : Number(PV6.defaults?.fdn_default ?? 0.6);
+    if(!isFinite(v)) v = 0.6;
+    if(v>1.5) v = v/100; // 69 -> 0.69
+    return Math.min(Math.max(v,0.3),0.9);
   }
 
   // ---------- inputs ----------
@@ -174,15 +209,6 @@
   }
 
   // ---------- DÍAS ----------
-  function getFDN(p){
-    const D=PV6.data||{};
-    let v = (D.fdnByPot?.[p] ?? D.FNDByPot?.[p] ?? D.fdn_by_pot?.[p] ?? null);
-    if(v==null) v = PV6.defaults?.fdn_default ?? 0.6; // 0.6 ≈ 60%
-    v = Number(v);
-    if(!isFinite(v)) v = 0.6;
-    if(v>1.5) v = v/100; // si viene 69 -> 0.69
-    return Math.min(Math.max(v,0.3),0.9); // clamp
-  }
   function daysFromM3(pot,endISO,UAovr){
     const fn = (typeof PV6.computeDays==="function") ? PV6.computeDays
              : (PV6.M3 && typeof PV6.M3.computeDays==="function") ? PV6.M3.computeDays
@@ -197,21 +223,21 @@
     const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450);
     const ua   = Math.max(UAovr||0, 0.0001);
 
-    // D0 (sin uso)
+    // D0 sin uso
     const d0 = (kg*area) / (ua*cons);
 
-    // FDN -> consumo real por UA según 120/FDN%
-    const fdn = getFDN(pot);                 // 0..1
-    const pct = (120/(fdn*100));             // ej 120/70 = 1.714% PV
-    const cons_fdn = auKg * (pct/100);       // kg/UA/d
+    // Consumo con FDN (120/FDN%)
+    const fdn = getFDN(pot);              // 0..1 (p.ej. 0.6899)
+    const pct = 120/(fdn*100);            // 120/68.99 = 1.739% PV
+    const cons_fdn = auKg * (pct/100);    // kg/UA/d
     const dfdn = (kg*area) / (ua*cons_fdn);
 
-    // desperdicio φ(D) = 1 − min(wmax, β·D_fdn)
+    // φ(D) sobre DFDN
     const beta = Number(PV6.defaults?.params?.beta ?? PV6.defaults?.beta ?? 0.05);
     const wmax = Number(PV6.defaults?.params?.wmax ?? PV6.defaults?.wmax ?? 0.3);
     const phi  = Math.max(0, 1 - Math.min(wmax, beta * dfdn));
-
     const dadj = dfdn * phi;
+
     return {d0, dfdn, phi, dadj};
   }
   function mapDays(obj, pot,endISO,UAovr){
@@ -310,7 +336,7 @@
 
     // primer render
     renderTable(ctx, 0);
-    console.log("[M2.12] listo — movRows:", rows.length);
+    console.log("[M2.13] listo — movRows:", rows.length, "fdnMap:", !!findFdnMap());
   }
 
   if(PV6.onDataReady && typeof PV6.onDataReady==="function"){
