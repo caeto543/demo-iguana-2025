@@ -233,7 +233,7 @@
 <!-- REGISTRO SW (nuevo) -->
 <script>
     if ("serviceWorker" in navigator) {
-      ./sw_mov_remote.js?ver=2.then(() => {
+      navigator.serviceWorker.register("./sw_mov_remote.js?ver=1").then(() => {
         console.log("[MOV][sw] registrado");
       }).catch(e => console.warn("[MOV][sw] error registro", e));
       navigator.serviceWorker.addEventListener("message", (ev) => {
@@ -248,6 +248,6 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 <!-- ÚNICO addon estable M2.16 -->
-<script src="pv6_m2_addon_v216.js?v=2.1"></script>
-</body>
+
+<script src="pv6_m2_addon_v216.js?v=2.2"></script></body>
 </html>
