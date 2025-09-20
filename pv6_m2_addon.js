@@ -1,6 +1,9 @@
 /* PV6 M2.10 — Pastoreo con manejo (PV6)
-   Fix: usar idx.occIdx / idx.uaIdx (antes: occIndex/uaIndex).
-   (Resto: igual a M2.9)
+   - Espera a que areaHaByPot y movRows estén listos (parche remoto).
+   - Origen (ocupados): movRows a la fecha (UA>0 u ocupado=1). Fallback: chips DOM “Ocupados (X)”.
+   - Destino: todos los potreros (sin filtro "Z" por ahora).
+   - Tabla: Días br./FDN/φ/Días aj. enganchando PV6.computeDays o PV6.M3.computeDays
+     con claves alternativas (dfdn|fdnDays|daysFdn, phi|phiD|wastePhi, dadj|daysAdj).
 */
 (function(){
   "use strict";
@@ -13,6 +16,7 @@
   const fmt2= v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(2);
   const fmt3= v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(3);
 
+  // --- utils ---
   function toISO(s){
     if (!s) return null; const str=String(s).trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
@@ -95,6 +99,7 @@
     return card;
   }
 
+  // --- data helpers ---
   function allPots(){
     const byArea = PV6.data?.areaHaByPot || {};
     return Object.keys(byArea).sort();
@@ -103,7 +108,8 @@
     try{
       if (PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg,dateISO);
       if (typeof window.stateForKg==="function") return window.stateForKg(kg,dateISO);
-    }catch(e){} return "";
+    }catch(e){}
+    return "";
   }
   function kgForPotNow(pot, dateISO){
     try{
@@ -122,6 +128,7 @@
     return Number(s[pick])||null;
   }
 
+  // --- MOV / índices ---
   function buildIndexesFromMov(rows){
     const uaIdx={}, occIdx={}, datesSet=new Set();
     const sorted=[...rows].map(r=>({
@@ -143,6 +150,7 @@
     return best;
   }
 
+  // --- DOM chips fallback ---
   function domOcupados(){
     const blocks=[...document.querySelectorAll("body *")]
       .filter(el=>/\bOcupados\s*\(\d+\)/i.test(el.textContent||""));
@@ -157,6 +165,7 @@
     return Array.from(set).sort();
   }
 
+  // --- ocupados a la fecha ---
   function ocupadosAFecha(endISO, idx){
     const tryFns=[PV6.ui?.ocupadosAt,PV6.ocupadosAt,PV6.ui?.ocupadosNow,PV6.ocupadosNow,
                   PV6.ui?.listOcupados,PV6.listOcupados,PV6.ui?.getOcupados,PV6.getOcupados]
@@ -166,7 +175,7 @@
     }
     const out=[];
     const pots=allPots();
-    // <<< FIX: usar occIdx/uaIdx >>>
+    // usar occIdx/uaIdx correctos
     for(const p of pots){
       const occ=lastOnOrBefore(idx.occIdx,p,endISO,null);
       if(occ!=null){ if(Number(occ)>0) out.push(p); continue; }
@@ -178,6 +187,7 @@
     return [];
   }
 
+  // --- inputs UA/PV/N ---
   function currentUAOverride(){
     const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450) || 450;
     const UA   = Number($('#pv6-ua')?.value || 0);
@@ -196,6 +206,7 @@
     [ua,pv,n].forEach(el=> el && el.addEventListener('input', sync)); sync();
   }
 
+  // --- tabla días ---
   function daysFromM3(pot, endISO, UAovr){
     const fn = (typeof PV6.computeDays==="function") ? PV6.computeDays
              : (PV6.M3 && typeof PV6.M3.computeDays==="function") ? PV6.M3.computeDays
@@ -206,7 +217,7 @@
   function mapDaysObj(obj, fallbackD0){
     const d0   = (obj?.d0 ?? obj?.d_bruto ?? obj?.days ?? fallbackD0 ?? 0);
     const dfdn = (obj?.dfdn ?? obj?.fdnDays ?? obj?.daysFdn ?? d0);
-    the constphi  = (obj?.phi  ?? obj?.phiD    ?? obj?.wastePhi ?? 1);
+    const phi  = (obj?.phi  ?? obj?.phiD    ?? obj?.wastePhi ?? 1);
     const dadj = (obj?.dadj ?? obj?.daysAdj ?? obj?.d_aj ?? (dfdn*phi));
     return {d0, dfdn, phi, dadj};
   }
@@ -217,6 +228,7 @@
     for(const nm of pots){
       const kg=kgForPotNow(nm,endISO);
       const st=(kg!=null)? classify(kg,endISO):"";
+      // D0 de respaldo
       const area=Number(PV6.data?.areaHaByPot?.[nm]||0);
       const uso =(PV6.state?.coefUso??60)/100;
       const cons=Number(PV6.state?.consumo??10);
@@ -239,9 +251,13 @@
     }
   }
 
+  // --- selects origen/destino ---
   function fillSelectors(ctx){
     const selO=$('#pv6-m2-origen'), selD=$('#pv6-m2-dest'), note=$('#pv6-m2-note');
-    if(!selO||!selD) return; selO.innerHTML=""; selD.innerHTML=""; note.textContent="";
+    if(!selO||!selD) return;
+    selO.innerHTML=""; selD.innerHTML=""; note.textContent="";
+
+    // origen
     let origenes=ocupadosAFecha(ctx.dateEnd, ctx.idx);
     if(!origenes.length && ctx.idx.dates.length){
       for(let i=ctx.idx.dates.length-1;i>=0;i--){
@@ -253,6 +269,7 @@
     if(!origenes.length){ const op=document.createElement('option'); op.value=""; op.textContent="(no hay ocupados a la fecha)"; selO.appendChild(op); }
     else origenes.forEach(nm=>{ const op=document.createElement('option'); op.value=nm; op.textContent=nm; selO.appendChild(op); });
 
+    // destino (todos)
     const op0=document.createElement('option'); op0.value="__NONE__"; op0.textContent="— Ningún potrero (salida de finca) —"; selD.appendChild(op0);
     allPots().forEach(nm=>{
       const kg=kgForPotNow(nm,ctx.dateEnd); const st=(kg!=null)? classify(kg,ctx.dateEnd):"";
@@ -260,9 +277,13 @@
     });
   }
 
+  // --- eventos ---
   function wire(ctx){
     $('#pv6-m2-btn-recalc')?.addEventListener('click', ()=>{ const {UA}=currentUAOverride(); renderTable(ctx, UA); });
-    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{ ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; }); renderTable(ctx, 0); });
+    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{
+      ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; });
+      renderTable(ctx, 0);
+    });
     const end=$('#date-end');
     if(end) end.addEventListener('change', ()=>{ ctx.dateEnd=toISO(end.value); fillSelectors(ctx); renderTable(ctx, currentUAOverride().UA); });
     ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
@@ -271,21 +292,26 @@
     });
   }
 
+  // --- esperar datos (parche remoto) ---
   function waitForData(maxMs=5000, step=150){
     return new Promise(resolve=>{
       const t0=Date.now();
       (function tick(){
         const byArea = PV6.data?.areaHaByPot;
         const mov    = PV6.data?.movRows;
-        if (byArea && Object.keys(byArea).length>0 && Array.isArray(mov) && mov.length>0){ resolve(true); return; }
+        if (byArea && Object.keys(byArea).length>0 && Array.isArray(mov) && mov.length>0){
+          resolve(true); return;
+        }
         if (Date.now()-t0>maxMs){ resolve(false); return; }
         setTimeout(tick, step);
       })();
     });
   }
 
+  // --- init ---
   async function init(){
     ensureStyles(); ensureCard();
+
     const ok = await waitForData();
     const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows: [];
     const idx  = buildIndexesFromMov(rows);
@@ -303,6 +329,7 @@
     console.log("[M2.10] listo — areaHa:", Object.keys(PV6.data?.areaHaByPot||{}).length, "movRows:", rows.length, "esperaOK:", ok);
   }
 
+  // arranque
   if (PV6.onDataReady && typeof PV6.onDataReady==="function"){
     const prev = PV6.onDataReady.bind(PV6);
     PV6.onDataReady = function(){ try{ prev(); }catch(e){} init(); };
