@@ -1,235 +1,186 @@
-/* PV6 M2.17 — Pastoreo con manejo (estable, con API y anclaje robusto)
-   - Inserta el card aunque no encuentre el ancla original (usa varios fallback y, si no, body)
-   - Origen (ocupados) desde PV6.data.movRows (≤ fecha “hasta”)
-   - Destino: Ninguno + Sugeridos (top Kg) + Todos (alfabético), excluye Z*
-   - Tabla: Dbr / Dfdn(120/FDN) / Δdesp(d)=min(wmax,β·Dfdn) / Daj / Estado(chips)
-   - Alinea Kg con fecha “hasta” y fuente (raw/7d)
-   - API pública: PV6.M216.calcDays(pot, fechaISO, {UA}), PV6.M216.render()
-*/
+// PV6 Manejo — M2.17
+// UI y cálculos: Origen ocupados, Destinos sugeridos + todos, tabla con Días br., Días FDN, Δ desperd., Días aj., Estado.
 (function(){
-  if (window.__PV6_M216__) return;
-  window.__PV6_M216__ = true;
-
-  (window.PV6 ||= {}); (PV6.data ||= {}); (PV6.state ||= {});
-  const A = PV6, D = PV6.data, S = PV6.state;
-
-  const $  = (s,r=document)=>r.querySelector(s);
-  const $$ = (s,r=document)=>Array.from(r.querySelectorAll(s));
-
-  function iso(s){
-    if(!s) return null;
-    s=String(s).trim();
-    if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if(m) return `${m[3]}-${m[2].padStart(2,"0")}-${m[1].padStart(2,"0")}`;
-    const dt=new Date(s); return isNaN(dt)? s : dt.toISOString().slice(0,10);
-  }
-  const endISO = ()=> iso(S.end || $("#date-end")?.value);
-  function fuenteMode(){
-    const f=(S.fuente||$("#fuente")?.value||$("#source")?.value||"").toLowerCase();
-    return (f.includes("raw")||f.includes("día")||f.includes("dia"))?"kgms_raw":"kgms_7d";
+  // Requiere que el app principal exponga:
+  // - state, series, moves, FND, AREAS, selectedParents, kgFor, inferNandOcc, computeRestDaysFromEvents, lastOnOrBefore, parseDate, addDays, daysBetween, clamp
+  if (typeof window === 'undefined' || typeof window.state === 'undefined') {
+    console.warn('[M2.17] App base no listo. Asegúrate de cargar app.v6.js antes de este addon.');
+    return;
   }
 
-  // Kg MS/ha por potrero alineado con UI
-  function kgForPot(p){
-    const mode=fuenteMode(), end=endISO();
-    try{
-      if (typeof A.ui?.kgForPot==="function") return A.ui.kgForPot(p,end,mode);
-      if (typeof A.kgForPot==="function")     return A.kgForPot(p,end,mode);
-    }catch(e){}
-    const map7=(D.kgms7dByPot||D.kgms_by_pot||{})[p], mapR=(D.kgmsRawByPot||D.kg_by_pot||{})[p];
-    const v7=map7?map7[end]:null, vR=mapR?mapR[end]:null;
-    return mode==="kgms_raw" ? (vR ?? v7 ?? null) : (v7 ?? vR ?? null);
+  const S = window.state;
+
+  function daysFDN(fnd){
+    // Regla: 120 / FDN  (FDN en 0–1)
+    if (fnd == null || !isFinite(fnd) || fnd <= 0) return null;
+    return 120 / (fnd * 100); // si FND viene en 0–1, 120/(FDN*100) = 1.2/FDN
   }
 
-  // Ocupados a la fecha “hasta” desde MOV
-  function listOcupados(){
-    const rows = Array.isArray(D.movRows)? D.movRows : [];
-    const idxUA={}, idxO={};
-    for(const r of rows){
-      const d=iso(r.date), p=String(r.name_canon||"").trim();
-      if(!d||!p) continue;
-      (idxUA[p] ||= {})[d] = Number(r.UA_total||0);
-      (idxO[p]  ||= {})[d] = (r.ocupado==null||r.ocupado==="")? null : (Number(r.ocupado)>0?1:0);
-    }
-    function last(idx,p,lim){
-      const rec=idx[p]; if(!rec) return null; let best=null, b="";
-      for(const k in rec){ const z=iso(k); if(z&&z<=lim&&z>=b){ best=rec[k]; b=z; } }
-      return best;
-    }
-    const lim=endISO();
-    const pots=Object.keys(D.areaHaByPot||{}); const out=[];
-    pots.forEach(p=>{
-      const o=last(idxO,p,lim);
-      if(o!=null){ if(o>0) out.push(p); return; }
-      const ua=last(idxUA,p,lim)||0; if(ua>0) out.push(p);
-    });
-    return out.sort();
+  function calcRow(nm, ds){
+    const dEnd = parseDate(ds);
+    const area = AREAS.get(nm) || 0;
+    const kg   = kgFor(nm, ds);
+    const fnd  = FND.has(nm) ? FND.get(nm) : null;
+    const {N, occ} = inferNandOcc(moves.get(nm)||[], dEnd);
+
+    // Días brutos
+    const uso = (S.coefUso/100);
+    const base = S.consumo;
+    const cons = (fnd==null)? base : clamp(base * (1 - S.params.alpha * fnd), 7, 14);
+    const oferta = (kg||0) * area * uso;
+    const demanda = (N||0) * cons;
+    const Dbr = (oferta>0 && demanda>0) ? (oferta/demanda) : null;
+
+    // Días FDN y ajuste
+    const Dfdn = daysFDN(fnd); // días mínimos por calidad
+    const delta = (Dfdn==null) ? null : Math.min(S.params.wmax, S.params.beta * Dfdn);
+    const Daj = (Dbr==null && Dfdn==null) ? null
+              : (Dbr==null) ? Math.max(0, Dfdn - (delta||0))
+              : (Dfdn==null) ? Dbr
+              : Math.max(Dbr, Dfdn - (delta||0));
+
+    // Estado (usa lógica de ranking de tu app)
+    const okEntrada = (kg!=null && kg>=S.params.Emin && kg<=S.params.Emax);
+    const estado = okEntrada ? 1 : (kg!=null && kg>=S.params.Smin ? 0 : -1);
+
+    return { nm, kg, N, area, fnd, Dbr, Dfdn, delta, Daj, estado, occ };
   }
 
-  // Panel UI — anclaje robusto
-  function findAnchor(){
-    // 1) a la derecha del mapa
-    let a = $$(".leaflet-container").slice(-1)[0]?.closest("div");
-    if (a) return a;
-    // 2) panel derecho comunes
-    a = $("#right, .right, #panel-derecho, .panel-derecho, aside, .sidebar, #sidebar");
-    if (a) return a;
-    // 3) sección que contenga “Simular pastoreo”
-    a = [...$$("section,div")].find(el => /simular\s+pastoreo/i.test((el.textContent||"")));
-    if (a) return a;
-    // 4) body como último recurso
-    return document.body;
-  }
+  function buildUI(){
+    const host = document.getElementById('pv6-manejo-card') || document.querySelector('.side');
+    if (!host) return;
 
-  function ensurePanel(){
-    let panel = $("#pv6-m2");
-    if(panel) return panel;
-    const anchor = findAnchor(); if(!anchor) return null;
-
-    panel = document.createElement("div");
-    panel.id="pv6-m2";
-    panel.style.marginTop="8px";
-    panel.innerHTML = `
-    <div class="card" style="padding:12px;border:1px solid #ddd;border-radius:10px;background:#fff">
-      <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <strong>Pastoreo con manejo (PV6) <small class="text-muted">M2.17</small></strong>
-        <div style="display:flex;gap:8px">
-          <button id="m216-recalc" class="btn btn-sm btn-light">Recalcular sugeridos</button>
-          <button id="m216-clear"  class="btn btn-sm btn-light">Limpiar</button>
+    const html = `
+      <div class="card-header">
+        <h3>Pastoreo con manejo (PV6)</h3>
+        <div style="font-size:12px;color:#6b7a8c" id="pv6-m2-status">—</div>
+      </div>
+      <div style="display:grid;gap:6px">
+        <label>Origen (ocupados al día “hasta”)<br>
+          <select id="pv6-origen"></select>
+        </label>
+        <label>Destino<br>
+          <select id="pv6-destino"></select>
+        </label>
+        <div class="table-wrap">
+          <table class="rank">
+            <thead>
+              <tr>
+                <th>Potrero</th>
+                <th>Kg MS/ha</th>
+                <th>Días br.</th>
+                <th>Días FDN</th>
+                <th>Δ desperd. (d)</th>
+                <th>Días aj.</th>
+                <th>Estado</th>
+              </tr>
+            </thead>
+            <tbody id="pv6-m2-body"></tbody>
+          </table>
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:6px">
-        <label>Origen (ocupados)
-          <select id="m216-origen" class="form-control form-control-sm"></select>
-        </label>
-        <label>Destino
-          <select id="m216-dest" class="form-control form-control-sm"></select>
-        </label>
-        <label>UA
-          <input id="m216-ua" class="form-control form-control-sm" type="number" step="1" placeholder="p.ej. 200"/>
-        </label>
-        <label>PV total (kg)
-          <input id="m216-pvkg" class="form-control form-control-sm" type="number" step="1" placeholder="p.ej. 81000"/>
-        </label>
-      </div>
-      <div style="overflow:auto;max-height:360px">
-        <table id="m216-tab" class="table table-sm">
-          <thead><tr>
-            <th>Potrero</th><th class="text-end">Kg MS/ha</th>
-            <th class="text-end">Días br.</th><th class="text-end">Días FDN</th>
-            <th class="text-end">Δ desper. (d)</th><th class="text-end">Días aj.</th>
-            <th>Estado</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>`;
-    // Insertar: si no es body, detrás del anchor; si es body, al final
-    if (anchor === document.body) document.body.appendChild(panel);
-    else anchor.parentElement.insertBefore(panel, anchor.nextSibling);
-    return panel;
-  }
-
-  // Selectores
-  function fillOrigen(){
-    const sel=$("#m216-origen"); if(!sel) return;
-    const occ=listOcupados(); sel.innerHTML="";
-    if(occ.length){ occ.forEach(p=> sel.append(new Option(p,p))); }
-    else sel.append(new Option("(no hay ocupados a la fecha)",""));
-  }
-  function fillDestino(){
-    const sel=$("#m216-dest"); if(!sel) return;
-    const all=Object.keys(D.areaHaByPot||{}).filter(p=>!/^z/i.test(p));
-    const top=[...all].map(p=>({p,kg:kgForPot(p)||0})).sort((a,b)=>b.kg-a.kg).slice(0,12).map(x=>x.p);
-    sel.innerHTML="";
-    sel.append(new Option("— Ningún potrero (salida de finca) —",""));
-    const g1=document.createElement("optgroup"); g1.label="Sugeridos";
-    top.forEach(p=> g1.append(new Option(p,p))); sel.appendChild(g1);
-    const g2=document.createElement("optgroup"); g2.label="Todos los potreros";
-    all.filter(p=>!top.includes(p)).sort((a,b)=>a.localeCompare(b)).forEach(p=> g2.append(new Option(p,p)));
-    sel.appendChild(g2);
-  }
-
-  // Parámetros
-  function params(){
-    const P=A.defaults?.params||A.params||{};
-    return {
-      coef: Number($("#coef-uso")?.value||S.coef||60)/100,
-      consumo: Number($("#consumo-base")?.value||S.consumo||10),
-      auKg: Number(A.defaults?.auKg ?? 450),
-      beta: Number(P.beta ?? 0.05),
-      wmax: Number(P.wmax ?? 0.30),
-    };
-  }
-  function fdnFor(p){
-    const v=D.fdnByPot?.[p]; if(v==null) return null;
-    const n=Number(v); if(!isFinite(n)) return null;
-    return n>1? n/100 : n;
-  }
-  function ofertaKg(p){
-    const kg=kgForPot(p)||0; const ha=Number(D.areaHaByPot?.[p]||0);
-    const {coef}=params(); return kg*ha*coef;
-  }
-
-  // Cálculos
-  function computeRow(p, UA){
-    const {consumo, auKg, beta, wmax} = params();
-    const kg=kgForPot(p)||0, off=ofertaKg(p);
-    const d_br = (UA>0 && consumo>0) ? (off/(UA*consumo)) : 0;
-
-    let d_fdn=d_br;
-    const fdn=fdnFor(p);
-    if (fdn && UA>0){
-      const imax = auKg * (120/(fdn*100)) / 100;  // kg/UA/d
-      const cap = Math.min(consumo, imax);
-      d_fdn = cap>0 ? (off/(UA*cap)) : 0;
+    `;
+    const card = document.getElementById('pv6-manejo-card');
+    if (card) card.innerHTML = html;
+    else if (host) {
+      const sec = document.createElement('section');
+      sec.className = 'card';
+      sec.innerHTML = html;
+      host.appendChild(sec);
     }
-    const delta = Math.min(wmax, beta * d_fdn);
-    const d_aj  = Math.max(d_br, d_fdn - delta);
-
-    let estado="—";
-    try{ if(typeof A.ui?.stateForKg==="function") estado=A.ui.stateForKg(kg,endISO())||"—"; }catch(e){}
-    return {p, kg, d_br, d_fdn, delta, d_aj, estado};
   }
 
-  // Render
-  function renderTable(){
-    const tb=$("#m216-tab tbody"); if(!tb) return;
-    const UA=Number($("#m216-ua")?.value||0);
-    const all=Object.keys(D.areaHaByPot||{}).filter(p=>!/^z/i.test(p));
-    const rows=all.map(p=>computeRow(p,UA));
-    const top=[...rows].sort((a,b)=>b.kg-a.kg).slice(0,12).map(r=>r.p);
-    rows.sort((a,b)=>{ const ai=top.indexOf(a.p), bi=top.indexOf(b.p);
-      if(ai>=0&&bi<0) return -1; if(bi>=0&&ai<0) return 1; return a.p.localeCompare(b.p); });
-    const fmt=(x,d=1)=> (isFinite(x)? x.toFixed(d) : "—");
-    tb.innerHTML = rows.map(r=>`
-      <tr>
-        <td>${r.p}</td>
-        <td class="text-end">${fmt(r.kg,3)}</td>
-        <td class="text-end">${fmt(r.d_br,1)}</td>
-        <td class="text-end">${fmt(r.d_fdn,1)}</td>
-        <td class="text-end">${fmt(r.delta,1)}</td>
-        <td class="text-end"><strong>${fmt(r.d_aj,1)}</strong></td>
-        <td>${r.estado}</td>
-      </tr>`).join("");
+  function refreshUI(){
+    const ds = S.end;
+    const dEnd = parseDate(ds);
+    const fuente = (S.fuente === 'raw') ? 'kgms_raw' : 'kgms_7d';
+    const statusEl = document.getElementById('pv6-m2-status');
+    if (statusEl) statusEl.textContent = `[M2.17] listo — fuente: ${fuente} hasta: ${ds}`;
+
+    // Origen (ocupados)
+    const origenSel = document.getElementById('pv6-origen');
+    const destinoSel = document.getElementById('pv6-destino');
+    const body = document.getElementById('pv6-m2-body');
+    if (!origenSel || !destinoSel || !body) return;
+
+    const padres = selectedParents();
+    const ocupados = [];
+    const libres = [];
+    padres.forEach(nm => {
+      if (nm.startsWith('z')) return;
+      const m = moves.get(nm) || [];
+      const {occ} = inferNandOcc(m, dEnd);
+      (occ ? ocupados : libres).push(nm);
+    });
+
+    // fill origen
+    origenSel.innerHTML = '';
+    ocupados.forEach(nm => {
+      const opt = document.createElement('option');
+      opt.value = nm;
+      opt.textContent = nm;
+      origenSel.appendChild(opt);
+    });
+
+    // destinos: none + sugeridos + todos
+    const makeOpt = (val, txt) => {
+      const o = document.createElement('option'); o.value = val; o.textContent = txt; return o;
+    };
+    destinoSel.innerHTML = '';
+    destinoSel.appendChild(makeOpt('__NONE__', '— Ningún potrero (salida de finca) —'));
+
+    // sugeridos por Kg
+    const rows = padres
+      .filter(nm => !nm.startsWith('z'))
+      .map(nm => ({nm, kg: kgFor(nm, ds) || 0}))
+      .sort((a,b)=> (b.kg - a.kg));
+
+    // Añade sugeridos (top 8)
+    rows.slice(0,8).forEach(r => destinoSel.appendChild(makeOpt(r.nm, `⭐ ${r.nm}`)));
+
+    // Separador visual
+    destinoSel.appendChild(makeOpt('', '────────────'));
+    rows.forEach(r => destinoSel.appendChild(makeOpt(r.nm, r.nm)));
+
+    // Tabla (calcular para todos los padres)
+    body.innerHTML = '';
+    rows.forEach(r => {
+      const x = calcRow(r.nm, ds);
+      const tr = document.createElement('tr');
+      const estadoTxt = x.estado===1 ? '<span class="state green">Verde</span>'
+                        : x.estado===0 ? '<span class="state yellow">Amarillo</span>'
+                        : '<span class="state red">Rojo</span>';
+      const fmt = n => (n==null || !isFinite(n)) ? '–' : (Math.round(n*10)/10).toLocaleString('es-CO');
+      tr.innerHTML = `
+        <td style="text-align:left">${x.nm}</td>
+        <td>${x.kg==null ? '–' : Math.round(x.kg).toLocaleString('es-CO')}</td>
+        <td>${fmt(x.Dbr)}</td>
+        <td>${fmt(x.Dfdn)}</td>
+        <td>${fmt(x.delta)}</td>
+        <td>${fmt(x.Daj)}</td>
+        <td>${estadoTxt}</td>`;
+      body.appendChild(tr);
+    });
   }
 
-  // API pública
-  PV6.M216 = {
-    calcDays: (pot, fechaISO, {UA}={}) => { if(fechaISO) PV6.state.end=fechaISO; return computeRow(pot, Number(UA||0)); },
-    render:   () => { try{ fillDestino(); renderTable(); }catch(e){ console.warn("[M2.17] render warn:", e); } }
-  };
-
-  function boot(){
-    const panel=ensurePanel(); if(!panel) { console.warn("[M2.17] sin ancla; card agregado al body"); }
-    fillOrigen(); fillDestino();
-    $("#m216-recalc")?.addEventListener("click", renderTable);
-    $("#m216-clear") ?.addEventListener("click", ()=>{ $("#m216-ua").value=""; $("#m216-pvkg").value=""; renderTable(); });
-    ["#date-end","#fuente","#source"].forEach(sel=>{ const el=$(sel); if(el) el.addEventListener("change", ()=> PV6.M216.render()); });
-    renderTable();
-    console.log("[M2.17] listo — fuente:", fuenteMode(), "hasta:", endISO());
+  // Hook con el app base
+  function attach(){
+    buildUI();
+    refreshUI();
+    // Escuchar cambios clave del UI base
+    const ids = ['date-end','fuente','coef-uso','consumo','mode'];
+    ids.forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', refreshUI);
+    });
+    const btn = document.getElementById('btn-apply');
+    if (btn) btn.addEventListener('click', refreshUI);
   }
 
-  if (document.readyState==="loading") document.addEventListener("DOMContentLoaded", boot, {once:true});
-  else boot();
+  // Espera a que el DOM y el app base estén listos
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', attach);
+  }else{
+    attach();
+  }
 })();
