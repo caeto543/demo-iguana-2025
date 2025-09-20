@@ -1,19 +1,17 @@
-/* PV6 M2.14 — Pastoreo con manejo (robusto FDN + anti-crash + filtro Z)
-   - Filtro Z: excluye nombres que empiezan por 'z' o segmentos *_z / -z / zN
-   - Detección FDN: busca en PV6.data el diccionario con valores ~[0..1] o [30..90]
-     ignorando valores tipo objeto/array; si falla, usa PV6.data.fdnByPot o fdn_default.
-   - Si FDN no está, NO rompe: Días FDN = D0 y φ(D)=1 hasta que aparezca.
+/* PV6 M2.14 — UI con manejo (origen ocupados + tabla días + destino ordenado)
+   Cambios clave:
+   - NUNCA usa area/geojson como FDN (lista de exclusión + rango restringido 0.3..0.9 o 30..90).
+   - Si existe PV6.data.Iguana_FND_por_potrero ⇒ se usa directo.
+   - Destino: “— Ningún potrero —”, luego “Sugeridos”, luego “Todos” (sin Z*).
 */
 (function(){
   "use strict";
+  const PV6=(window.PV6=window.PV6||{}); PV6.state=PV6.state||{}; PV6.data=PV6.data||{};
 
-  const PV6 = (window.PV6 = window.PV6 || {});
-  PV6.state = PV6.state || {};
-  const $ = (s, r=document)=>r.querySelector(s);
-
-  const fmt1=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(1);
-  const fmt2=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(2);
-  const fmt3=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(3);
+  const $=(s,r=document)=>r.querySelector(s);
+  const fmt1=v=>(v==null||!isFinite(v))?"–":Number(v).toFixed(1);
+  const fmt2=v=>(v==null||!isFinite(v))?"–":Number(v).toFixed(2);
+  const fmt3=v=>(v==null||!isFinite(v))?"–":Number(v).toFixed(3);
 
   function toISO(s){
     if(!s) return null; const t=String(s).trim();
@@ -22,8 +20,9 @@
     if(m){const d=m[1].padStart(2,"0"),M=m[2].padStart(2,"0"),y=m[3];return `${y}-${M}-${d}`;}
     const dt=new Date(t); return isNaN(dt)?t:dt.toISOString().slice(0,10);
   }
+  const isZ = nm => /^z/i.test(nm) || nm.split(/[_-]/).some(seg=>/^z(\d+)?$/i.test(seg));
 
-  // ---------- UI (idéntica a la anterior, resumido el CSS) ----------
+  // ---------- UI ----------
   function ensureStyles(){
     if($('#pv6-m2-styles')) return;
     const st=document.createElement('style'); st.id='pv6-m2-styles';
@@ -41,8 +40,6 @@
       #pv6-m2-card .tbl thead th:first-child,#pv6-m2-card .tbl tbody td:first-child{text-align:left}
       #pv6-m2-card .tbl tbody td{padding:6px 8px;text-align:right;border-bottom:1px solid #f2f2f2}
       #pv6-m2-tip{color:#666;font-size:12px}
-      #pv6-m2-grid{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:8px}
-      #pv6-m2-grid label{font-size:12px;color:#444}
     `;
     document.head.appendChild(st);
   }
@@ -50,7 +47,7 @@
     const sim=[...document.querySelectorAll("h1,h2,h3,h4,strong")]
       .find(h=>/Simular pastoreo\s*\(sin manejo\)/i.test(h.textContent||""));
     if(sim && sim.parentNode) return {node:sim.parentNode,mode:"before"};
-    const right = $('#pv6-m2-slot') || $('#panel-derecho') || $('#right-panel') || $('.col-right') || $('#sidebar');
+    const right = $('#pv6-m2-slot') || $('#sidebar') || $('#panel-derecho') || $('.col-right');
     if(right) return {node:right,mode:"append"};
     const mapW = $('#map')?.parentNode || document.body;
     return {node:mapW,mode:"afterMap"};
@@ -70,7 +67,7 @@
         <div class="col"><label>Origen (ocupados)</label><select id="pv6-m2-origen" class="inp"></select></div>
         <div class="col"><label>Destino</label><select id="pv6-m2-dest" class="inp"></select></div>
         <div class="col">
-          <div id="pv6-m2-grid">
+          <div style="display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:8px">
             <div><label>UA</label><input id="pv6-ua" class="inp" type="number" step="1" min="0"></div>
             <div><label>PV total (kg)</label><input id="pv6-pvkg" class="inp" type="number" step="1" min="0"></div>
             <div><label>N total</label><input id="pv6-n" class="inp" type="number" step="1" min="0"></div>
@@ -91,36 +88,27 @@
     return card;
   }
 
-  // ---------- helpers datos ----------
-  const isZ = nm => /^z/i.test(nm) || nm.split(/[_-]/).some(seg=>/^z(\d+)?$/i.test(seg));
-  function allPots(){
-    const byArea = PV6.data?.areaHaByPot || {};
-    return Object.keys(byArea).filter(nm=>!isZ(nm)).sort();
-  }
-  function classify(kg, dateISO){
-    try{
-      if (PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg,dateISO);
-      if (typeof window.stateForKg==="function") return window.stateForKg(kg,dateISO);
-    }catch(e){} return "";
+  // ---------- datos ----------
+  function allPots(){ const m=PV6.data?.areaHaByPot||{}; return Object.keys(m).filter(n=>!isZ(n)).sort(); }
+  function classify(kg, iso){ try{
+    if(PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg,iso);
+    if(typeof window.stateForKg==="function") return window.stateForKg(kg,iso);
+  }catch(e){} return "";
   }
   function kgForPot(pot, endISO){
-    try{
-      if(typeof PV6.kgForPot==="function") return PV6.kgForPot(pot,endISO);
-      if(PV6.ui && typeof PV6.ui.kgForPot==="function") return PV6.ui.kgForPot(pot,endISO);
-    }catch(e){}
     const raw = (PV6.state?.fuente||"kgms_7d").toLowerCase().includes("raw");
-    const D = PV6.data||{};
-    const map = raw ? (D.kgmsRawByPot || D.kg_by_pot) : (D.kgms7dByPot || D.kgms_by_pot);
-    const s = map?.[pot]; if(!s) return null;
-    const ks = Object.keys(s).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
+    const D=PV6.data||{};
+    const map = raw ? (D.kgmsRawByPot||D.kg_by_pot) : (D.kgms7dByPot||D.kgms_by_pot);
+    const s=map?.[pot]; if(!s) return null;
+    const ks=Object.keys(s).filter(k=>/^\d{4}-\d{2}-\d{2}$/.test(k)).sort();
     if(!ks.length) return Number(s)||null;
-    const end=toISO(PV6.state?.end || $('#date-end')?.value || ks[ks.length-1]);
+    const end=toISO(PV6.state?.end||$('#date-end')?.value||ks[ks.length-1]);
     const i=ks.findIndex(k=>k>=end);
     const pick=(i<0)?ks[ks.length-1]:(ks[i]===end?end:ks[Math.max(0,i-1)]);
     return Number(s[pick])||null;
   }
 
-  // ---------- MOV índices ----------
+  // MOV índices (UA/ocupado)
   function buildIdx(rows){
     const uaIdx={}, occIdx={}, dates=new Set();
     const arr=[...rows].map(r=>({
@@ -147,137 +135,69 @@
       const ua =lastOnOrBefore(idx.uaIdx ,p,endISO,0);
       if(ua>0) out.push(p);
     }
-    if(out.length) return out.sort();
-    // fallback por chips del DOM
-    const blocks=[...document.querySelectorAll("body *")].filter(el=>/\bOcupados\s*\(\d+\)/i.test(el.textContent||""));
-    const set=new Set(); blocks.forEach(b=>{
-      b.querySelectorAll("a,button,span,div").forEach(e=>{
-        const t=(e.textContent||"").trim(); const m=/^([A-Za-z0-9_]+)\b/.exec(t); if(m) set.add(m[1]);
-      });
-    });
-    return [...set].filter(n=>!isZ(n)).sort();
+    return out.sort();
   }
 
-  // ---------- FDN robusto ----------
-  let _FDN_MAP = null, _FDN_KEY = null;
-  function findFdnMap(){
-    if(_FDN_MAP) return _FDN_MAP;
-    const D = PV6.data || {};
-    if (D.fdnByPot && typeof D.fdnByPot === "object" && !Array.isArray(D.fdnByPot)){
-      _FDN_MAP = D.fdnByPot; _FDN_KEY="fdnByPot"; return _FDN_MAP;
-    }
-    const pots = Object.keys(D.areaHaByPot||{});
-    let best=null, bestScore=-1, bestKey=null;
-
-    for(const k of Object.keys(D)){
-      const v=D[k];
-      if(!v || typeof v!=="object" || Array.isArray(v)) continue;
-      // debe contener varios potreros
-      const inter=pots.filter(p=>p in v); if(inter.length<10) continue;
-      let score=0, cnt=0;
-      for(const p of inter.slice(0,50)){
-        const raw=v[p];
-        if(raw==null) continue;
-        if(typeof raw==="object") continue;         // <— evita el error del log
-        const num = Number(raw);
-        if(!isFinite(num)) continue;
-        // aceptamos 0..1.2 o 30..90
-        if((num>0 && num<1.2) || (num>30 && num<90)) score++;
-        cnt++;
-      }
-      if(cnt>=10 && score>bestScore){ best=v; bestScore=score; bestKey=k; }
-    }
-    if(best){ _FDN_MAP=best; _FDN_KEY=bestKey; }
-    return _FDN_MAP;
-  }
+  // Detección robusta de FDN (rechaza area/geojson/…)
+  const REJECT_KEYS = new Set(["geojson","areaHaByPot","kgms7dByPot","kgmsRawByPot","kg_by_pot","kgms_by_pot","movRows"]);
+  let _FDN_KEY="(default)";
   function getFDN(p){
-    try{
-      const m = findFdnMap();
-      let v = (m && m[p] != null) ? Number(m[p]) : NaN;
-      if(!isFinite(v)) v = Number(PV6.defaults?.fdn_default ?? 0.6);
-      if(v>1.5) v = v/100; // 69 -> 0.69
-      return Math.min(Math.max(v,0.3),0.9);
-    }catch(e){
-      // anti-crash
-      const def = Number(PV6.defaults?.fdn_default ?? 0.6);
-      return (isFinite(def)? def : 0.6);
+    // 1) preferente: Iguana_FND_por_potrero o fdnByPot
+    const direct = PV6.data.Iguana_FND_por_potrero || PV6.data.fdnByPot;
+    if (direct && p in direct){
+      _FDN_KEY = direct===PV6.data.fdnByPot ? "fdnByPot" : "Iguana_FND_por_potrero";
+      let v = Number(direct[p]); if(!isFinite(v)) v = PV6.defaults?.fdn_default ?? 0.6;
+      if (v>1.5) v=v/100; return Math.min(Math.max(v,0.3),0.9);
     }
+    // 2) heurística estricta (solo 0.3..0.9 o 30..90, y no claves rechazadas)
+    const D=PV6.data||{};
+    let best=null,score=-1;
+    for(const k of Object.keys(D)){
+      if(REJECT_KEYS.has(k)) continue;
+      const v=D[k]; if(!v||typeof v!=="object"||Array.isArray(v)) continue;
+      const vv=v[p]; if(vv==null || typeof vv==="object") continue;
+      let n=Number(vv); if(!isFinite(n)) continue;
+      let ok=false;
+      if(n>0.3 && n<0.95){ ok=true; }             // 0.3..0.9 (ya en fracción)
+      else if(n>30 && n<90){ n=n/100; ok=true; }  // 30..90 → 0.30..0.90
+      if(!ok) continue;
+      // +puntaje por rango y cantidad de matches numéricos
+      let s=1;
+      best=v; score=s; _FDN_KEY=k;
+      break; // suficientemente estricto: primer match vale
+    }
+    if(best){ let n=Number(best[p]); if(n>30&&n<90) n=n/100; return Math.min(Math.max(n,0.3),0.9); }
+    // 3) default
+    return Number(PV6.defaults?.fdn_default ?? 0.6);
   }
 
-  // ---------- inputs ----------
-  function currentUA(){
-    const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450) || 450;
-    const UA   = Number($('#pv6-ua')?.value || 0);
-    const PVkg = Number($('#pv6-pvkg')?.value || 0);
-    const N    = Number($('#pv6-n')?.value || 0);
-    if(UA>0) return {UA,lock:"ua"};
-    if(PVkg>0) return {UA:PVkg/auKg,lock:"pv"};
-    if(N>0) return {UA:N,lock:"n"};
-    return {UA:0,lock:null};
-  }
-  function wireInputs(onChange){
-    const ua=$('#pv6-ua'), pv=$('#pv6-pvkg'), n=$('#pv6-n');
-    function sync(){ const {lock}=currentUA();
-      ua.disabled=(lock&&lock!=="ua"); pv.disabled=(lock&&lock!=="pv"); n.disabled=(lock&&lock!=="n");
-      onChange();
-    }
-    [ua,pv,n].forEach(el=>el&&el.addEventListener('input',sync)); sync();
-  }
-
-  // ---------- días ----------
-  function daysFromM3(pot,endISO,UAovr){
-    const fn = (typeof PV6.computeDays==="function") ? PV6.computeDays
-             : (PV6.M3 && typeof PV6.M3.computeDays==="function") ? PV6.M3.computeDays
-             : null;
-    if(!fn) return null;
-    try{ return fn(pot,endISO,UAovr||0); }catch(e){ return null; }
-  }
-  function calcDaysFallback(pot,endISO,UAovr){
-    const kg   = kgForPot(pot,endISO)||0;
+  function computeDays(pot,endISO,UA){
+    if(PV6.M3 && typeof PV6.M3.computeDays==="function") return PV6.M3.computeDays(pot,endISO,UA);
+    // fallback rápido si M3 no está
+    const kg   = Number(kgForPot(pot,endISO)||0);
     const area = Number(PV6.data?.areaHaByPot?.[pot]||0);
-    const cons = Number(PV6.state?.consumo ?? 10);           // kg/UA/d
-    const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450);
-    const ua   = Math.max(UAovr||0, 0.0001);
+    const cons = Number(PV6.state?.consumo ?? 10);
+    const auKg = Number(PV6.defaults?.auKg ?? 450);
+    const ua   = Math.max(Number(UA)||0, 0.0001);
 
-    // D0 (sin uso)
-    const d0 = (kg*area) / (ua*cons);
-
-    // FDN: consumo por UA = auKg * (120/FDN%) /100
-    let dfdn=d0, phi=1, dadj=d0;
-    try{
-      const fdn = getFDN(pot);              // 0..1
-      const pct = 120/(fdn*100);            // %
-      const cons_fdn = auKg * (pct/100);    // kg/UA/d
-      dfdn = (kg*area) / (ua*cons_fdn);
-
-      // φ(D) sobre DFDN
-      const beta = Number(PV6.defaults?.params?.beta ?? PV6.defaults?.beta ?? 0.05);
-      const wmax = Number(PV6.defaults?.params?.wmax ?? PV6.defaults?.wmax ?? 0.3);
-      phi  = Math.max(0, 1 - Math.min(wmax, beta * dfdn));
-      dadj = dfdn * phi;
-    }catch(e){ /* deja d0 */ }
-
-    return {d0, dfdn, phi, dadj};
-  }
-  function mapDays(obj, pot,endISO,UAovr){
-    if(obj){
-      const d0   = (obj.d0   ?? obj.d_bruto ?? obj.days ?? null);
-      const dfdn = (obj.dfdn ?? obj.fdnDays ?? obj.daysFdn ?? null);
-      const phi  = (obj.phi  ?? obj.phiD    ?? obj.wastePhi ?? null);
-      const dadj = (obj.dadj ?? obj.daysAdj ?? obj.d_aj ?? null);
-      const ok=[d0,dfdn,phi,dadj].every(v=>v!=null && isFinite(v));
-      if(ok) return {d0,dfdn,phi,dadj};
-    }
-    return calcDaysFallback(pot,endISO,UAovr);
+    const d0 = (kg*area)/(ua*cons);
+    const fdn = getFDN(pot);
+    const pct = 120/(fdn*100);
+    const cons_fdn = auKg*(pct/100);
+    const dfdn = (kg*area)/(ua*cons_fdn);
+    const beta = Number(PV6.defaults?.params?.beta ?? 0.05);
+    const wmax = Number(PV6.defaults?.params?.wmax ?? 0.3);
+    const phi  = Math.max(0, 1 - Math.min(wmax, beta * dfdn));
+    const dadj = dfdn * phi;
+    return {d0,dfdn,phi,dadj};
   }
 
-  function renderTable(ctx, UAovr){
+  function renderTable(endISO, UA){
     const tb=$('#pv6-m2-tab tbody'); if(!tb) return; tb.innerHTML="";
-    const endISO=ctx.dateEnd;
     for(const nm of allPots()){
       const kg = kgForPot(nm,endISO);
-      const st = (kg!=null)? classify(kg,endISO):"";
-      const d  = mapDays(daysFromM3(nm,endISO,UAovr), nm,endISO,UAovr);
+      const d  = computeDays(nm,endISO,UA);
+      const st = (kg!=null)? classify(kg,endISO) : "";
       const tr=document.createElement('tr');
       tr.innerHTML=`
         <td style="text-align:left">${nm}</td>
@@ -291,35 +211,78 @@
     }
   }
 
-  function fillSelectors(ctx){
-    const selO=$('#pv6-m2-origen'), selD=$('#pv6-m2-dest'), note=$('#pv6-m2-note');
-    if(!selO||!selD) return; selO.innerHTML=""; selD.innerHTML=""; note.textContent="";
+  function suggested(endISO){
+    // sugeridos: libres (no ocupados) con estado “verde” y mayor kg
+    const idx = buildIdx(PV6.data?.movRows||[]);
+    const occ = new Set(ocupadosAFecha(endISO, idx));
+    const pots = allPots().filter(p=>!occ.has(p));
+    const rows = pots.map(p=>{
+      const kg=kgForPot(p,endISO)||0;
+      const st=classify(kg,endISO)||"";
+      return {p,kg,rank: (st==="Verde"?2:(st==="Ajuste"?1:0), st)};
+    });
+    rows.sort((a,b)=> b.rank - a.rank || b.kg - a.kg || a.p.localeCompare(b.p));
+    return rows.map(r=>r.p).slice(0,12); // top 12
+  }
 
-    // origen
-    let origenes=ocupadosAFecha(ctx.dateEnd, ctx.idx);
-    if(!origenes.length && ctx.idx.dates.length){
-      for(let i=ctx.idx.dates.length-1;i>=0;i--){
-        const dd=ctx.idx.dates[i], o2=ocupadosAFecha(dd, ctx.idx);
-        if(o2.length){ ctx.dateEnd=dd; const inp=$('#date-end'); if(inp) inp.value=dd;
-          origenes=o2; note.textContent=`Fecha ajustada a ${dd} para mostrar “ocupados”.`; break; }
+  function fillSelectors(endISO){
+    const selO=$('#pv6-m2-origen'), selD=$('#pv6-m2-dest'), note=$('#pv6-m2-note');
+    if(!selO||!selD) return; selO.innerHTML=""; selD.innerHTML=""; if(note) note.textContent="";
+
+    const idx = buildIdx(PV6.data?.movRows||[]);
+    let origenes = ocupadosAFecha(endISO, idx);
+    if(!origenes.length && idx.dates.length){
+      for(let i=idx.dates.length-1;i>=0;i--){
+        const dd=idx.dates[i], o2=ocupadosAFecha(dd, idx);
+        if(o2.length){ endISO=dd; const inp=$('#date-end'); if(inp) inp.value=dd;
+          origenes=o2; if(note) note.textContent=`Fecha ajustada a ${dd} para mostrar “ocupados”.`; break; }
       }
     }
     if(!origenes.length){ const op=document.createElement('option'); op.value=""; op.textContent="(no hay ocupados a la fecha)"; selO.appendChild(op); }
     else origenes.forEach(nm=>{ const op=document.createElement('option'); op.value=nm; op.textContent=nm; selO.appendChild(op); });
 
-    // destino (sin Z)
     const op0=document.createElement('option'); op0.value="__NONE__"; op0.textContent="— Ningún potrero (salida de finca) —"; selD.appendChild(op0);
-    allPots().forEach(nm=>{
-      const kg=kgForPot(nm,ctx.dateEnd); const st=(kg!=null)? classify(kg,ctx.dateEnd):"";
-      const op=document.createElement('option'); op.value=nm; op.textContent= st? `${nm} (${st})` : nm; selD.appendChild(op);
-    });
+
+    // bloque SUGERIDOS
+    const sug = suggested(endISO);
+    if(sug.length){
+      const g=document.createElement('optgroup'); g.label="Destinos sugeridos";
+      sug.forEach(nm=>{ const op=document.createElement('option'); op.value=nm; op.textContent=nm; g.appendChild(op); });
+      selD.appendChild(g);
+    }
+    // bloque TODOS
+    const g2=document.createElement('optgroup'); g2.label="Todos los potreros";
+    allPots().forEach(nm=>{ const op=document.createElement('option'); op.value=nm; op.textContent=nm; g2.appendChild(op); });
+    selD.appendChild(g2);
+
+    return endISO; // por si se autoajustó
+  }
+
+  function currentUA(){
+    const auKg = Number(PV6.defaults?.auKg ?? 450);
+    const UA   = Number($('#pv6-ua')?.value || 0);
+    const PVkg = Number($('#pv6-pvkg')?.value || 0);
+    const N    = Number($('#pv6-n')?.value || 0);
+    if(UA>0) return {UA, lock:"ua"};
+    if(PVkg>0) return {UA:PVkg/auKg, lock:"pv"};
+    if(N>0) return {UA:N, lock:"n"};
+    return {UA:0, lock:null};
+  }
+
+  function wireInputs(onChange){
+    const ua=$('#pv6-ua'), pv=$('#pv6-pvkg'), n=$('#pv6-n');
+    function sync(){ const {lock}=currentUA();
+      ua.disabled=(lock&&lock!=="ua"); pv.disabled=(lock&&lock!=="pv"); n.disabled=(lock&&lock!=="n");
+      onChange();
+    }
+    [ua,pv,n].forEach(el=>el&&el.addEventListener('input',sync)); sync();
   }
 
   function waitForData(maxMs=7000, step=150){
     return new Promise(res=>{
       const t0=Date.now(); (function tick(){
         const ok = (PV6.data?.areaHaByPot && Object.keys(PV6.data.areaHaByPot).length>0 &&
-                    Array.isArray(PV6.data?.movRows) && PV6.data.movRows.length>0);
+                    Array.isArray(PV6.data?.movRows));
         if(ok) return res(true);
         if(Date.now()-t0>maxMs) return res(false);
         setTimeout(tick, step);
@@ -328,34 +291,27 @@
   }
 
   async function init(){
-    try{
-      ensureStyles(); ensureCard();
-      await waitForData();
+    ensureStyles(); ensureCard();
+    await waitForData();
+    let endISO = toISO(PV6.state?.end || $('#date-end')?.value);
 
-      const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows: [];
-      const idx  = buildIdx(rows);
-      const ctx = {
-        dateEnd: toISO(PV6.state?.end || $('#date-end')?.value || (idx.dates[idx.dates.length-1] || "2025-12-31")),
-        idx
-      };
+    endISO = fillSelectors(endISO) || endISO;
 
-      fillSelectors(ctx);
-      const recalc = ()=> renderTable(ctx, currentUA().UA);
+    const recalc = ()=>{ const UA=currentUA().UA; renderTable(endISO, UA); };
+    $('#pv6-m2-btn-recalc')?.addEventListener('click', recalc);
+    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{ ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{const el=$(id); if(el) el.value="";}); renderTable(endISO, 0); });
+    const end=$('#date-end'); if(end) end.addEventListener('change', ()=>{ endISO=toISO(end.value); endISO=fillSelectors(endISO)||endISO; recalc(); });
+    ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
+      const el=document.getElementById(id); if(el && el.tagName==="SELECT"){
+        el.addEventListener('change', ()=>{ endISO=fillSelectors(endISO)||endISO; recalc(); });
+      }
+    });
+    wireInputs(recalc);
+    renderTable(endISO, 0);
 
-      $('#pv6-m2-btn-recalc')?.addEventListener('click', recalc);
-      $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{ ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; }); renderTable(ctx, 0); });
-      const end=$('#date-end'); if(end) end.addEventListener('change', ()=>{ ctx.dateEnd=toISO(end.value); fillSelectors(ctx); recalc(); });
-      ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
-        const el=document.getElementById(id); if(el && el.tagName==="SELECT") el.addEventListener('change', ()=>{ fillSelectors(ctx); recalc(); });
-      });
-      (function wireInputs(){ const ua=$('#pv6-ua'),pv=$('#pv6-pvkg'),n=$('#pv6-n'); function sync(){ const {lock}=currentUA(); ua.disabled=(lock&&lock!=="ua"); pv.disabled=(lock&&lock!=="pv"); n.disabled=(lock&&lock!=="n"); recalc(); } [ua,pv,n].forEach(el=>el&&el.addEventListener('input',sync)); sync(); })();
-
-      renderTable(ctx, 0);
-      const hasFdn = !!findFdnMap();
-      console.log("[M2.14] listo — movRows:", rows.length, "fdnKey:", hasFdn? _FDN_KEY : "(default)");
-    }catch(e){
-      console.warn("[M2.14] init warning:", e);
-    }
+    console.log("[M2.14] listo — movRows:", (PV6.data?.movRows||[]).length, "fdnKey:",
+      PV6.data.Iguana_FND_por_potrero ? "Iguana_FND_por_potrero" :
+      (PV6.data.fdnByPot ? "fdnByPot" : "(default)"));
   }
 
   if(PV6.onDataReady && typeof PV6.onDataReady==="function"){
