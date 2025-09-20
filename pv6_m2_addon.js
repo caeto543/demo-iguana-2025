@@ -1,7 +1,8 @@
-/* PV6 M2.13 — Pastoreo con manejo (PV6)
-   - Filtro Z robusto (prefijo 'z' y segmentos z*)
-   - FDN map finder dinámico en PV6.data (0–1 o 0–100)
-   - D0 sin uso; DFDN con (120/FDN%); φ(D) sobre DFDN; Daj = DFDN·φ
+/* PV6 M2.14 — Pastoreo con manejo (robusto FDN + anti-crash + filtro Z)
+   - Filtro Z: excluye nombres que empiezan por 'z' o segmentos *_z / -z / zN
+   - Detección FDN: busca en PV6.data el diccionario con valores ~[0..1] o [30..90]
+     ignorando valores tipo objeto/array; si falla, usa PV6.data.fdnByPot o fdn_default.
+   - Si FDN no está, NO rompe: Días FDN = D0 y φ(D)=1 hasta que aparezca.
 */
 (function(){
   "use strict";
@@ -9,11 +10,11 @@
   const PV6 = (window.PV6 = window.PV6 || {});
   PV6.state = PV6.state || {};
   const $ = (s, r=document)=>r.querySelector(s);
+
   const fmt1=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(1);
   const fmt2=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(2);
   const fmt3=v=> (v==null||!isFinite(v))? "–": Number(v).toFixed(3);
 
-  // ---------- utils ----------
   function toISO(s){
     if(!s) return null; const t=String(s).trim();
     if(/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
@@ -21,6 +22,8 @@
     if(m){const d=m[1].padStart(2,"0"),M=m[2].padStart(2,"0"),y=m[3];return `${y}-${M}-${d}`;}
     const dt=new Date(t); return isNaN(dt)?t:dt.toISOString().slice(0,10);
   }
+
+  // ---------- UI (idéntica a la anterior, resumido el CSS) ----------
   function ensureStyles(){
     if($('#pv6-m2-styles')) return;
     const st=document.createElement('style'); st.id='pv6-m2-styles';
@@ -37,7 +40,7 @@
       #pv6-m2-card .tbl thead th{position:sticky;top:0;background:#fafafa;z-index:1;text-align:right;padding:8px;font-weight:600;border-bottom:1px solid #eee}
       #pv6-m2-card .tbl thead th:first-child,#pv6-m2-card .tbl tbody td:first-child{text-align:left}
       #pv6-m2-card .tbl tbody td{padding:6px 8px;text-align:right;border-bottom:1px solid #f2f2f2}
-      #pv6-m2-tip{color:#666;font-size:12px} #pv6-m2-note{font-size:12px;color:#555;margin-left:8px}
+      #pv6-m2-tip{color:#666;font-size:12px}
       #pv6-m2-grid{display:grid;grid-template-columns:repeat(3,minmax(110px,1fr));gap:8px}
       #pv6-m2-grid label{font-size:12px;color:#444}
     `;
@@ -58,7 +61,7 @@
     card=document.createElement('div'); card.id='pv6-m2-card';
     card.innerHTML=`
       <div class="row" style="align-items:center;gap:8px">
-        <h3 class="title">Pastoreo con manejo (PV6)</h3><span class="badge">M2.13</span><span id="pv6-m2-note"></span>
+        <h3 class="title">Pastoreo con manejo (PV6)</h3><span class="badge">M2.14</span><span id="pv6-m2-note"></span>
         <div style="flex:1"></div>
         <button id="pv6-m2-btn-recalc" class="btn">Recalcular sugeridos</button>
         <button id="pv6-m2-btn-clear" class="btn">Limpiar</button>
@@ -68,11 +71,11 @@
         <div class="col"><label>Destino</label><select id="pv6-m2-dest" class="inp"></select></div>
         <div class="col">
           <div id="pv6-m2-grid">
-            <div><label>UA</label><input id="pv6-ua" class="inp" type="number" step="1" min="0" placeholder="p.ej. 180"></div>
-            <div><label>PV total (kg)</label><input id="pv6-pvkg" class="inp" type="number" step="1" min="0" placeholder="p.ej. 81000"></div>
-            <div><label>N total</label><input id="pv6-n" class="inp" type="number" step="1" min="0" placeholder="p.ej. 300"></div>
+            <div><label>UA</label><input id="pv6-ua" class="inp" type="number" step="1" min="0"></div>
+            <div><label>PV total (kg)</label><input id="pv6-pvkg" class="inp" type="number" step="1" min="0"></div>
+            <div><label>N total</label><input id="pv6-n" class="inp" type="number" step="1" min="0"></div>
           </div>
-          <div id="pv6-m2-tip" style="margin-top:6px">Tip: UA ↔ PV/N son excluyentes. Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.</div>
+          <div id="pv6-m2-tip" style="margin-top:6px">UA ↔ PV/N son excluyentes. Si escribes UA se bloquean PV/N; si PV ⇒ UA con auKg; si N ⇒ UA con N.</div>
         </div>
       </div>
       <div style="overflow:auto;margin-top:10px;max-height:360px">
@@ -88,11 +91,17 @@
     return card;
   }
 
-  // ---------- filtros / datos ----------
+  // ---------- helpers datos ----------
   const isZ = nm => /^z/i.test(nm) || nm.split(/[_-]/).some(seg=>/^z(\d+)?$/i.test(seg));
   function allPots(){
     const byArea = PV6.data?.areaHaByPot || {};
     return Object.keys(byArea).filter(nm=>!isZ(nm)).sort();
+  }
+  function classify(kg, dateISO){
+    try{
+      if (PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg,dateISO);
+      if (typeof window.stateForKg==="function") return window.stateForKg(kg,dateISO);
+    }catch(e){} return "";
   }
   function kgForPot(pot, endISO){
     try{
@@ -109,12 +118,6 @@
     const i=ks.findIndex(k=>k>=end);
     const pick=(i<0)?ks[ks.length-1]:(ks[i]===end?end:ks[Math.max(0,i-1)]);
     return Number(s[pick])||null;
-  }
-  function classify(kg, dateISO){
-    try{
-      if (PV6.ui && typeof PV6.ui.stateForKg==="function") return PV6.ui.stateForKg(kg,dateISO);
-      if (typeof window.stateForKg==="function") return window.stateForKg(kg,dateISO);
-    }catch(e){} return "";
   }
 
   // ---------- MOV índices ----------
@@ -145,7 +148,7 @@
       if(ua>0) out.push(p);
     }
     if(out.length) return out.sort();
-    // fallback DOM chips
+    // fallback por chips del DOM
     const blocks=[...document.querySelectorAll("body *")].filter(el=>/\bOcupados\s*\(\d+\)/i.test(el.textContent||""));
     const set=new Set(); blocks.forEach(b=>{
       b.querySelectorAll("a,button,span,div").forEach(e=>{
@@ -155,37 +158,50 @@
     return [...set].filter(n=>!isZ(n)).sort();
   }
 
-  // ---------- FDN finder ----------
-  let _FDN_MAP = null;
+  // ---------- FDN robusto ----------
+  let _FDN_MAP = null, _FDN_KEY = null;
   function findFdnMap(){
     if(_FDN_MAP) return _FDN_MAP;
     const D = PV6.data || {};
+    if (D.fdnByPot && typeof D.fdnByPot === "object" && !Array.isArray(D.fdnByPot)){
+      _FDN_MAP = D.fdnByPot; _FDN_KEY="fdnByPot"; return _FDN_MAP;
+    }
     const pots = Object.keys(D.areaHaByPot||{});
-    const dicts = Object.keys(D).filter(k=>{
-      const v=D[k]; if(!v || typeof v!=="object" || Array.isArray(v)) return false;
-      // candidato si contiene >50% de potreros y valores numéricos dentro [0..1] o [30..90]
-      const keys=Object.keys(v); if(keys.length<10) return false;
-      const inter= pots.filter(p=>p in v).length;
-      if(inter < Math.max(10, pots.length*0.5)) return false;
+    let best=null, bestScore=-1, bestKey=null;
+
+    for(const k of Object.keys(D)){
+      const v=D[k];
+      if(!v || typeof v!=="object" || Array.isArray(v)) continue;
+      // debe contener varios potreros
+      const inter=pots.filter(p=>p in v); if(inter.length<10) continue;
       let score=0, cnt=0;
-      for(const p of pots.slice(0,30)){
-        if(!(p in v)) continue;
-        const val=Number(v[p]);
-        if(!isFinite(val)) continue;
-        if((val>0 && val<1.2) || (val>30 && val<90)) score++;
+      for(const p of inter.slice(0,50)){
+        const raw=v[p];
+        if(raw==null) continue;
+        if(typeof raw==="object") continue;         // <— evita el error del log
+        const num = Number(raw);
+        if(!isFinite(num)) continue;
+        // aceptamos 0..1.2 o 30..90
+        if((num>0 && num<1.2) || (num>30 && num<90)) score++;
         cnt++;
       }
-      return cnt>5 && score>=Math.floor(cnt*0.6);
-    });
-    _FDN_MAP = dicts.length ? D[dicts[0]] : null;
+      if(cnt>=10 && score>bestScore){ best=v; bestScore=score; bestKey=k; }
+    }
+    if(best){ _FDN_MAP=best; _FDN_KEY=bestKey; }
     return _FDN_MAP;
   }
   function getFDN(p){
-    const m = findFdnMap();
-    let v = (m && m[p] != null) ? Number(m[p]) : Number(PV6.defaults?.fdn_default ?? 0.6);
-    if(!isFinite(v)) v = 0.6;
-    if(v>1.5) v = v/100; // 69 -> 0.69
-    return Math.min(Math.max(v,0.3),0.9);
+    try{
+      const m = findFdnMap();
+      let v = (m && m[p] != null) ? Number(m[p]) : NaN;
+      if(!isFinite(v)) v = Number(PV6.defaults?.fdn_default ?? 0.6);
+      if(v>1.5) v = v/100; // 69 -> 0.69
+      return Math.min(Math.max(v,0.3),0.9);
+    }catch(e){
+      // anti-crash
+      const def = Number(PV6.defaults?.fdn_default ?? 0.6);
+      return (isFinite(def)? def : 0.6);
+    }
   }
 
   // ---------- inputs ----------
@@ -208,7 +224,7 @@
     [ua,pv,n].forEach(el=>el&&el.addEventListener('input',sync)); sync();
   }
 
-  // ---------- DÍAS ----------
+  // ---------- días ----------
   function daysFromM3(pot,endISO,UAovr){
     const fn = (typeof PV6.computeDays==="function") ? PV6.computeDays
              : (PV6.M3 && typeof PV6.M3.computeDays==="function") ? PV6.M3.computeDays
@@ -223,20 +239,23 @@
     const auKg = Number(PV6.defaults?.auKg ?? PV6.state?.auKg ?? 450);
     const ua   = Math.max(UAovr||0, 0.0001);
 
-    // D0 sin uso
+    // D0 (sin uso)
     const d0 = (kg*area) / (ua*cons);
 
-    // Consumo con FDN (120/FDN%)
-    const fdn = getFDN(pot);              // 0..1 (p.ej. 0.6899)
-    const pct = 120/(fdn*100);            // 120/68.99 = 1.739% PV
-    const cons_fdn = auKg * (pct/100);    // kg/UA/d
-    const dfdn = (kg*area) / (ua*cons_fdn);
+    // FDN: consumo por UA = auKg * (120/FDN%) /100
+    let dfdn=d0, phi=1, dadj=d0;
+    try{
+      const fdn = getFDN(pot);              // 0..1
+      const pct = 120/(fdn*100);            // %
+      const cons_fdn = auKg * (pct/100);    // kg/UA/d
+      dfdn = (kg*area) / (ua*cons_fdn);
 
-    // φ(D) sobre DFDN
-    const beta = Number(PV6.defaults?.params?.beta ?? PV6.defaults?.beta ?? 0.05);
-    const wmax = Number(PV6.defaults?.params?.wmax ?? PV6.defaults?.wmax ?? 0.3);
-    const phi  = Math.max(0, 1 - Math.min(wmax, beta * dfdn));
-    const dadj = dfdn * phi;
+      // φ(D) sobre DFDN
+      const beta = Number(PV6.defaults?.params?.beta ?? PV6.defaults?.beta ?? 0.05);
+      const wmax = Number(PV6.defaults?.params?.wmax ?? PV6.defaults?.wmax ?? 0.3);
+      phi  = Math.max(0, 1 - Math.min(wmax, beta * dfdn));
+      dadj = dfdn * phi;
+    }catch(e){ /* deja d0 */ }
 
     return {d0, dfdn, phi, dadj};
   }
@@ -246,17 +265,16 @@
       const dfdn = (obj.dfdn ?? obj.fdnDays ?? obj.daysFdn ?? null);
       const phi  = (obj.phi  ?? obj.phiD    ?? obj.wastePhi ?? null);
       const dadj = (obj.dadj ?? obj.daysAdj ?? obj.d_aj ?? null);
-      if([d0,dfdn,phi,dadj].every(v=>v!=null && isFinite(v))) return {d0,dfdn,phi,dadj};
+      const ok=[d0,dfdn,phi,dadj].every(v=>v!=null && isFinite(v));
+      if(ok) return {d0,dfdn,phi,dadj};
     }
     return calcDaysFallback(pot,endISO,UAovr);
   }
 
-  // ---------- render ----------
   function renderTable(ctx, UAovr){
     const tb=$('#pv6-m2-tab tbody'); if(!tb) return; tb.innerHTML="";
     const endISO=ctx.dateEnd;
-    const pots=allPots();
-    for(const nm of pots){
+    for(const nm of allPots()){
       const kg = kgForPot(nm,endISO);
       const st = (kg!=null)? classify(kg,endISO):"";
       const d  = mapDays(daysFromM3(nm,endISO,UAovr), nm,endISO,UAovr);
@@ -277,7 +295,7 @@
     const selO=$('#pv6-m2-origen'), selD=$('#pv6-m2-dest'), note=$('#pv6-m2-note');
     if(!selO||!selD) return; selO.innerHTML=""; selD.innerHTML=""; note.textContent="";
 
-    // origen (ocupados)
+    // origen
     let origenes=ocupadosAFecha(ctx.dateEnd, ctx.idx);
     if(!origenes.length && ctx.idx.dates.length){
       for(let i=ctx.idx.dates.length-1;i>=0;i--){
@@ -289,7 +307,7 @@
     if(!origenes.length){ const op=document.createElement('option'); op.value=""; op.textContent="(no hay ocupados a la fecha)"; selO.appendChild(op); }
     else origenes.forEach(nm=>{ const op=document.createElement('option'); op.value=nm; op.textContent=nm; selO.appendChild(op); });
 
-    // destino (todos sin Z)
+    // destino (sin Z)
     const op0=document.createElement('option'); op0.value="__NONE__"; op0.textContent="— Ningún potrero (salida de finca) —"; selD.appendChild(op0);
     allPots().forEach(nm=>{
       const kg=kgForPot(nm,ctx.dateEnd); const st=(kg!=null)? classify(kg,ctx.dateEnd):"";
@@ -297,7 +315,6 @@
     });
   }
 
-  // ---------- wait & init ----------
   function waitForData(maxMs=7000, step=150){
     return new Promise(res=>{
       const t0=Date.now(); (function tick(){
@@ -311,32 +328,34 @@
   }
 
   async function init(){
-    ensureStyles(); ensureCard();
-    await waitForData();
+    try{
+      ensureStyles(); ensureCard();
+      await waitForData();
 
-    const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows: [];
-    const idx  = buildIdx(rows);
+      const rows = Array.isArray(PV6.data?.movRows)? PV6.data.movRows: [];
+      const idx  = buildIdx(rows);
+      const ctx = {
+        dateEnd: toISO(PV6.state?.end || $('#date-end')?.value || (idx.dates[idx.dates.length-1] || "2025-12-31")),
+        idx
+      };
 
-    const ctx = {
-      dateEnd: toISO(PV6.state?.end || $('#date-end')?.value || (idx.dates[idx.dates.length-1] || "2025-12-31")),
-      idx
-    };
+      fillSelectors(ctx);
+      const recalc = ()=> renderTable(ctx, currentUA().UA);
 
-    fillSelectors(ctx);
-    const recalc = ()=> renderTable(ctx, currentUA().UA);
+      $('#pv6-m2-btn-recalc')?.addEventListener('click', recalc);
+      $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{ ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; }); renderTable(ctx, 0); });
+      const end=$('#date-end'); if(end) end.addEventListener('change', ()=>{ ctx.dateEnd=toISO(end.value); fillSelectors(ctx); recalc(); });
+      ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
+        const el=document.getElementById(id); if(el && el.tagName==="SELECT") el.addEventListener('change', ()=>{ fillSelectors(ctx); recalc(); });
+      });
+      (function wireInputs(){ const ua=$('#pv6-ua'),pv=$('#pv6-pvkg'),n=$('#pv6-n'); function sync(){ const {lock}=currentUA(); ua.disabled=(lock&&lock!=="ua"); pv.disabled=(lock&&lock!=="pv"); n.disabled=(lock&&lock!=="n"); recalc(); } [ua,pv,n].forEach(el=>el&&el.addEventListener('input',sync)); sync(); })();
 
-    // eventos
-    $('#pv6-m2-btn-recalc')?.addEventListener('click', recalc);
-    $('#pv6-m2-btn-clear')?.addEventListener('click', ()=>{ ['#pv6-ua','#pv6-pvkg','#pv6-n'].forEach(id=>{ const el=$(id); if(el) el.value=""; }); renderTable(ctx, 0); });
-    const end=$('#date-end'); if(end) end.addEventListener('change', ()=>{ ctx.dateEnd=toISO(end.value); fillSelectors(ctx); recalc(); });
-    ["fuente","source","sel-fuente","select-fuente"].forEach(id=>{
-      const el=document.getElementById(id); if(el && el.tagName==="SELECT") el.addEventListener('change', ()=>{ fillSelectors(ctx); recalc(); });
-    });
-    wireInputs(recalc);
-
-    // primer render
-    renderTable(ctx, 0);
-    console.log("[M2.13] listo — movRows:", rows.length, "fdnMap:", !!findFdnMap());
+      renderTable(ctx, 0);
+      const hasFdn = !!findFdnMap();
+      console.log("[M2.14] listo — movRows:", rows.length, "fdnKey:", hasFdn? _FDN_KEY : "(default)");
+    }catch(e){
+      console.warn("[M2.14] init warning:", e);
+    }
   }
 
   if(PV6.onDataReady && typeof PV6.onDataReady==="function"){
