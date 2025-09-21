@@ -239,7 +239,7 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (inline, con puente DOM → Ranking de potreros) -->
+<!-- Addon manejo PV6 (inline, detector robusto de Ranking) -->
 <script>
 (function(){
   function ensurePanel(){
@@ -247,7 +247,7 @@
     if (card) return card;
     card = document.createElement('section');
     card.id = 'pv6-manejo-floating';
-    card.style.cssText = 'position:fixed; right:12px; bottom:12px; width:520px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #e5e7eb; box-shadow:0 10px 25px rgba(0,0,0,.12); border-radius:16px; z-index:9999; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+    card.style.cssText = 'position:fixed; right:12px; bottom:12px; width:560px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #e5e7eb; box-shadow:0 10px 25px rgba(0,0,0,.12); border-radius:16px; z-index:9999; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
     card.innerHTML = `
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3">
         <h3 style="margin:0;font-size:16px">Pastoreo con manejo (PV6)</h3>
@@ -265,7 +265,7 @@
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días aj.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Estado</th>
             </tr></thead>
-            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Esperando datos…</td></tr></tbody>
+            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Buscando “Ranking de potreros (Pastoreo)”…</td></tr></tbody>
           </table>
         </div>
       </div>`;
@@ -276,30 +276,48 @@
   function fmt(n){ return (n==null||!isFinite(n)) ? '–' : (Math.round(n*10)/10).toLocaleString('es-CO'); }
   function daysFDN(f){ if (f==null||!isFinite(f)||f<=0) return null; const pct=(f<=1)?f*100:f; return 120/pct; }
 
-  // Lee la tabla "Ranking de potreros (Pastoreo)" del panel derecho → [{nm, kg, fnd}]
-  function readRankingDOM(){
-    const result = [];
-    // busca tarjetas/títulos que contengan "Ranking de potreros"
-    const all = Array.from(document.querySelectorAll('h3, h4, .card-header, .card-title, .widget-title, [class*="heading"]'));
-    const hdr = all.find(el => /ranking\s+de\s+potreros/i.test(el.textContent||''));
-    if (!hdr) return result;
-    // tabla asociada (sube al contenedor y busca <table>)
-    const wrap = hdr.closest('section, .card, .widget, div') || document;
-    const table = wrap.querySelector('table');
-    if (!table) return result;
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
-    rows.forEach(tr=>{
+  // 1) Intenta ubicar por título exacto/cercano
+  function findRankingContainer(){
+    const match = /ranking\s+de\s+potreros/i;
+    const candidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,.card-header,.card-title,[class*="heading"],[data-title]'));
+    let h = candidates.find(el => match.test((el.textContent||'').trim()));
+    if (h) {
+      let container = h.closest('section, .card, .widget, .panel, div');
+      if (container) return container;
+    }
+    // 2) Fallback: busca una tabla con cabeceras esperadas
+    const tables = Array.from(document.querySelectorAll('table'));
+    for (const t of tables){
+      const ths = Array.from(t.querySelectorAll('thead th, thead td, tbody tr:first-child th, tbody tr:first-child td')).map(x=>(x.textContent||'').trim().toLowerCase());
+      const hasPotrero = ths.some(x=>/potrero/.test(x));
+      const hasKg = ths.some(x=>/kg\s*ms\/?ha/i.test(x) || /kgms\/?ha/i.test(x));
+      const hasFND = ths.some(x=>/fnd/i.test(x));
+      if (hasPotrero && hasKg && hasFND) return t.closest('section, .card, .widget, .panel, div') || t.parentElement;
+    }
+    return null;
+  }
+
+  // Extrae filas {nm, kg, fnd} desde el contenedor/tabla del ranking
+  function readRanking(container){
+    const table = container.querySelector('table') || container;
+    const rows = [];
+    Array.from(table.querySelectorAll('tbody tr')).forEach(tr=>{
       const tds = tr.querySelectorAll('td,th');
-      if (tds.length < 3) return;
+      if (tds.length<3) return;
       const nm = (tds[0].textContent||'').trim();
-      // 2da col: Kg MS/ha; 4ta (o 3ra/4ta según tu tabla) suele mostrar FND (“77%”, “–”)
-      const kgTxt  = (tds[1].textContent||'').replace(/[^\d.,-]/g,'').replace('.','').replace(',','.');
-      const fndTxt = (tds[3] ? tds[3].textContent : '').replace(/[^\d.,-]/g,'').replace('.','').replace(',','.');
-      const kg  = kgTxt ? parseFloat(kgTxt)  : null;
-      const fnd = fndTxt ? parseFloat(fndTxt) : null; // en % si existe
-      if (nm) result.push({ nm, kg, fnd });
+      // intenta encontrar columnas por heurística
+      const txts = Array.from(tds).map(td=>(td.textContent||'').trim());
+      // Kg en segunda columna típicamente
+      const kgTxt = (txts[1]||'').replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
+      // FND suele estar en la cuarta; si no, prueba cualquier col con %
+      let fndTxt = (txts[3]||'');
+      if (!/%/.test(fndTxt)) fndTxt = (txts.find(x=>/%/.test(x))||'');
+      fndTxt = fndTxt.replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
+      const kg = kgTxt? parseFloat(kgTxt): null;
+      const fnd = fndTxt? parseFloat(fndTxt): null;
+      if (nm) rows.push({nm, kg, fnd});
     });
-    return result;
+    return rows;
   }
 
   function renderFromRanking(){
@@ -307,21 +325,24 @@
     const body = document.getElementById('pv6-m2-body');
     if (!status || !body) return false;
 
-    const rows = readRankingDOM();
+    const container = findRankingContainer();
+    if (!container){
+      status.textContent = 'buscando ranking…';
+      return false;
+    }
+    const rows = readRanking(container);
     if (!rows.length){
-      status.textContent = 'esperando datos del app…';
+      status.textContent = 'ranking encontrado, esperando filas…';
       return false;
     }
 
     status.textContent = '[M2.17] listo — fuente: ranking (DOM)';
-
     body.innerHTML = '';
-    rows.slice(0, 25).forEach(r=>{
-      // Con DOM no tenemos UA ni área → Días br. = –, usamos FDN para Días aj. con Δ = min(wmax, β*Dfdn)
+    rows.slice(0,30).forEach(r=>{
       const Dfdn = daysFDN(r.fnd);
       const beta = 0.05, wmax = 0.30;
       const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
-      const Dbr = null;
+      const Dbr = null; // sin UA/área aquí
       const Daj = (Dfdn==null) ? null : Math.max(0, Dfdn - (delta||0));
       const estadoTxt = (r.kg==null) ? '–'
         : (r.kg>=2000 && r.kg<=3200) ? '<span class="state green">Verde</span>'
@@ -343,11 +364,9 @@
 
   function start(){
     ensurePanel();
-    // Reintenta llenar desde el DOM hasta que el ranking esté presente
     const iv = setInterval(()=>{ if (renderFromRanking()) clearInterval(iv); }, 400);
-    setTimeout(()=>clearInterval(iv), 12000);
-
-    // Recalcular cuando el usuario cambie fuente/controles
+    setTimeout(()=>clearInterval(iv), 15000);
+    // reintenta al cambiar controles
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
       const el=document.getElementById(id);
       if (!el) return;
