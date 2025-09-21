@@ -239,57 +239,53 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (chips + FND + UA/KPI + AREAS si existen) -->
+<!-- Addon manejo PV6 (chips + CSV AREAS/FND + UA editable) -->
 <script>
 (function(){
+  // ------- UI flotante -------
   function ensurePanel(){
     let card=document.getElementById('pv6-manejo-floating');
     if(card) return card;
     card=document.createElement('section');
     card.id='pv6-manejo-floating';
-    card.style.cssText='position:fixed;right:12px;bottom:12px;width:560px;max-height:60vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 10px 25px rgba(0,0,0,.12);border-radius:16px;z-index:9999;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+    card.style.cssText='position:fixed;right:12px;bottom:12px;width:620px;max-height:66vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 10px 25px rgba(0,0,0,.12);border-radius:16px;z-index:9999;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
     card.innerHTML=`
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3;gap:12px">
         <h3 style="margin:0;font-size:16px">Pastoreo con manejo (PV6)</h3>
-        <div id="pv6-m2-status" style="font-size:12px;color:#6b7a8c">inicializando…</div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:12px">
+          <label>UA</label>
+          <input id="pv6-ua" type="number" step="1" min="0" style="width:80px;padding:4px 6px;border:1px solid #d1d5db;border-radius:8px" />
+          <button id="pv6-recalc" style="padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;border-radius:8px;cursor:pointer">Recalcular</button>
+          <span id="pv6-m2-status" style="color:#6b7a8c"></span>
+        </div>
       </div>
       <div style="padding:8px 12px">
-        <div class="table-wrap" style="max-height:44vh;overflow:auto">
+        <div class="table-wrap" style="max-height:48vh;overflow:auto">
           <table class="rank" style="width:100%;border-collapse:collapse">
             <thead><tr>
               <th style="text-align:left;padding:6px 4px;border-bottom:1px solid #eee">Potrero</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Kg MS/ha</th>
+              <th style="padding:6px 4px;border-bottom:1px solid #eee">Área (ha)</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días br.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días FDN</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Δ desperd. (d)</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días aj.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Estado</th>
             </tr></thead>
-            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Leyendo datos…</td></tr></tbody>
+            <tbody id="pv6-m2-body"><tr><td colspan="8" style="padding:8px 4px;color:#6b7a8c">Cargando AREAS/FND…</td></tr></tbody>
           </table>
         </div>
       </div>`;
     document.body.appendChild(card);
+    // acciones
+    const btn=document.getElementById('pv6-recalc'); btn.addEventListener('click', ()=>render());
     return card;
   }
 
+  // ------- utilidades -------
   const getNum = t => (t||'').toString().replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
-
   function fmt(n){return(n==null||!isFinite(n))?'–':(Math.round(n*10)/10).toLocaleString('es-CO');}
   function daysFDN(f){if(f==null||!isFinite(f)||f<=0)return null;const pct=(f<=1)?f*100:f;return 120/pct;}
-
-  // Lee UA del KPI "UA efectiva (Potrero)"
-  function readUAFromKPI(){
-    const nodes=[...document.querySelectorAll('div,section,span,strong,h3')];
-    const box=nodes.find(el=>/UA\s+efectiva\s*\(Potrero\)/i.test(el.textContent||''));
-    if(!box) return null;
-    // busca un número dentro del mismo bloque
-    const num=(box.parentElement||box).querySelector('div,span,strong');
-    const v=num? parseFloat(getNum(num.textContent)) : null;
-    return isFinite(v)? v : null;
-  }
-
-  // Controles
   function readControls(){
     const coefEl=document.querySelector('#coef-uso, [name="coef-uso"], input[placeholder*="coef"]');
     const consEl=document.querySelector('#consumo, [name="consumo"], input[placeholder*="consumo"]');
@@ -297,11 +293,23 @@
     const base = consEl? parseFloat(getNum(consEl.value||consEl.textContent)) : 10;
     return { coefUso: isFinite(coef)? coef : 60, base: isFinite(base)? base : 10 };
   }
+  function autollenarUA(){
+    const uaInput=document.getElementById('pv6-ua');
+    if (!uaInput || uaInput.value) return;
+    // UA ≈ (Demanda diaria (Finca)) / base
+    const demNode=[...document.querySelectorAll('div,section,span,strong,h3')].find(el=>/Demanda\s+diaria\s*\(Finca\)/i.test(el.textContent||''));
+    const {base}=readControls();
+    if(demNode){
+      const num=(demNode.parentElement||demNode).querySelector('div,span,strong');
+      const dem=num? parseFloat(getNum(num.textContent)) : null;
+      if(isFinite(dem) && base>0) uaInput.value = Math.round(dem/base);
+    }
+  }
 
-  // Chips Ocupados/Libres → [{nm, kg}]
+  // ------- lectura de chips -------
   function readChips(){
     const out=[];
-    const pick = (re)=> {
+    const pick = re => {
       const nodes=[...document.querySelectorAll('h1,h2,h3,h4,div,span')];
       const hdr=nodes.find(el=>re.test((el.textContent||'').trim()));
       return hdr? (hdr.closest('section,div,article')||hdr.parentElement):null;
@@ -323,44 +331,71 @@
     return uniq;
   }
 
+  // ------- carga CSVs (AREAS, FND) -------
+  const AREAS=new Map(), FND=new Map();
+  async function loadCSVtoMaps(){
+    try{
+      const [areasTxt,fndTxt] = await Promise.all([
+        fetch('Nombres_area_iguana.csv').then(r=>r.text()),
+        fetch('Iguana_FND_por_potrero.csv').then(r=>r.text())
+      ]);
+      // áreas: busca nombre & área numérica
+      areasTxt.split(/\r?\n/).forEach(line=>{
+        const cols=line.split(',');
+        if(cols.length<2) return;
+        const nm=(cols[0]||'').trim();
+        const ha=parseFloat(getNum(cols[1]||cols[cols.length-1]||''));
+        if(nm && isFinite(ha)) AREAS.set(nm,ha);
+      });
+      // FND: potrero, fnd(%)
+      fndTxt.split(/\r?\n/).forEach(line=>{
+        const cols=line.split(',');
+        if(cols.length<2) return;
+        const nm=(cols[0]||'').trim();
+        const f=parseFloat(getNum(cols[1]||cols[cols.length-1]||''));
+        if(nm && isFinite(f)) FND.set(nm,f); // porcentaje (0–100)
+      });
+    }catch(e){/* silencioso */}
+  }
+
+  // ------- render -------
   function render(){
     const status=document.getElementById('pv6-m2-status');
     const body=document.getElementById('pv6-m2-body');
     if(!status||!body) return false;
 
     const rows=readChips();
-    if(!rows.length){ status.textContent='leyendo chips…'; return false; }
-
-    const FND = (window.FND instanceof Map)? window.FND : new Map();
-    const AREAS = (window.AREAS instanceof Map)? window.AREAS : new Map();
-    const UA = readUAFromKPI(); // puede ser null
+    const uaInput=document.getElementById('pv6-ua');
+    const UA = uaInput && uaInput.value ? parseFloat(uaInput.value) : null;
     const {coefUso, base} = readControls();
+    const uso=(coefUso||0)/100;
 
-    status.textContent = `[M2.17] listo — fuente: chips+FND — UA:${UA??'–'} coef:${coefUso}% base:${base}`;
-
+    status.textContent = `[M2.17] listo — fuente: chips + CSV — UA:${UA??'–'} coef:${coefUso}% base:${base}`;
     body.innerHTML='';
-    rows.slice(0,30).forEach(r=>{
-      const ha = AREAS.get(r.nm);       // puede ser undefined
-      const uso = (coefUso||0)/100;
-      const oferta = (isFinite(r.kg)&&isFinite(ha)) ? (r.kg*ha*uso) : null; // kg totales disponibles
+
+    rows.slice(0,40).forEach(r=>{
+      const ha = AREAS.get(r.nm);
+      const oferta = (isFinite(r.kg)&&isFinite(ha)) ? (r.kg*ha*uso) : null; // kg disponibles
       const demanda = (UA!=null && isFinite(UA)) ? (UA*base) : null;        // kg/día
       const Dbr = (oferta!=null && demanda!=null && demanda>0)? (oferta/demanda) : null;
 
-      const fnd = FND.has(r.nm)? FND.get(r.nm) : null;
+      const fnd = FND.get(r.nm);
       const Dfdn = daysFDN(fnd);
-      const beta = 0.05, wmax = 0.30;
-      const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
+      const beta=0.05, wmax=0.30;
+      const delta=(Dfdn==null)?null:Math.min(wmax,beta*Dfdn);
       const Daj = (Dbr==null && Dfdn==null) ? null
                 : (Dbr==null) ? Math.max(0,(Dfdn||0)-(delta||0))
                 : (Dfdn==null) ? Dbr
                 : Math.max(Dbr, Dfdn - (delta||0));
-      const estadoTxt = (r.kg>=2000 && r.kg<=3200) ? '<span class="state green">Verde</span>'
-                       : (r.kg>=1600) ? '<span class="state yellow">Amarillo</span>'
-                       : '<span class="state red">Rojo</span>';
+
+      const estadoTxt=(r.kg>=2000&&r.kg<=3200)?'<span class="state green">Verde</span>' :
+                      (r.kg>=1600)?'<span class="state yellow">Amarillo</span>' :
+                      '<span class="state red">Rojo</span>';
 
       const tr=document.createElement('tr');
-      tr.innerHTML = `<td style="text-align:left;padding:6px 4px">${r.nm}</td>
+      tr.innerHTML=`<td style="text-align:left;padding:6px 4px">${r.nm}</td>
         <td style="padding:6px 4px">${Math.round(r.kg).toLocaleString('es-CO')}</td>
+        <td style="padding:6px 4px">${isFinite(ha)? fmt(ha):'–'}</td>
         <td style="padding:6px 4px">${fmt(Dbr)}</td>
         <td style="padding:6px 4px">${fmt(Dfdn)}</td>
         <td style="padding:6px 4px">${fmt(delta)}</td>
@@ -371,15 +406,18 @@
     return true;
   }
 
-  function start(){
+  async function start(){
     ensurePanel();
+    autollenarUA();
+    await loadCSVtoMaps();        // carga AREAS & FND desde el repo
     const iv=setInterval(()=>{ if(render()) clearInterval(iv); }, 300);
     setTimeout(()=>clearInterval(iv), 12000);
 
-    // recalcular al cambiar controles visibles
-    ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
-      const el=document.getElementById(id); if(!el) return;
-      const ev=(id==='btn-apply')?'click':'change';
+    // recalcular al cambiar controles y UA
+    ['date-end','fuente','coef-uso','consumo','mode','btn-apply','pv6-ua'].forEach(id=>{
+      const el=(id==='pv6-ua')? document.getElementById(id) : document.getElementById(id);
+      if(!el) return;
+      const ev = (id==='btn-apply')?'click':'change';
       el.addEventListener(ev, ()=>render());
     });
     window.addEventListener('scroll', ()=>render(), {passive:true});
