@@ -1,12 +1,9 @@
-// PV6 Manejo — M2.17 (ROBUST WAIT)
+// PV6 Manejo — M2.17 (FLOATING PANEL, layout-agnostic)
 (function(){
   let started = false;
 
   function ready(){
-    return (typeof window !== 'undefined')
-        && window.state
-        && document.querySelector('aside')
-        && document.body;
+    return (typeof window !== 'undefined') && window.state && document.body;
   }
 
   function parseDate(s){ try{ return new Date(s+'T00:00:00'); }catch(_){ return new Date(); } }
@@ -46,7 +43,7 @@
 
   function daysFDN(f){
     if (f==null || !isFinite(f) || f<=0) return null;
-    const pct = (f<=1) ? (f*100) : f; // acepta 0–1 o %
+    const pct = (f<=1) ? (f*100) : f;
     return 120 / pct;
   }
 
@@ -77,28 +74,29 @@
     return { nm, kg, Dbr, Dfdn, delta, Daj, estado };
   }
 
-  function buildUI(side){
-    let card = document.getElementById('pv6-manejo-card');
+  function buildUI(){
+    let card = document.getElementById('pv6-manejo-floating');
     if (!card){
       card = document.createElement('section');
-      card.id = 'pv6-manejo-card';
-      card.className = 'card';
+      card.id = 'pv6-manejo-floating';
+      card.style.cssText = 'position:fixed; right:12px; bottom:12px; width:520px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #e5e7eb; box-shadow:0 10px 25px rgba(0,0,0,.12); border-radius:16px; z-index:9999;';
+      card.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3">
+          <h3 style="margin:0;font-size:16px">Pastoreo con manejo (PV6)</h3>
+          <div id="pv6-m2-status" style="font-size:12px;color:#6b7a8c">—</div>
+        </div>
+        <div style="padding:8px 12px">
+          <div class="table-wrap" style="max-height:44vh;overflow:auto">
+            <table class="rank" style="width:100%">
+              <thead><tr>
+                <th style="text-align:left">Potrero</th><th>Kg MS/ha</th><th>Días br.</th><th>Días FDN</th><th>Δ desperd. (d)</th><th>Días aj.</th><th>Estado</th>
+              </tr></thead>
+              <tbody id="pv6-m2-body"></tbody>
+            </table>
+          </div>
+        </div>`;
+      document.body.appendChild(card);
     }
-    card.innerHTML = `
-      <div class="card-header">
-        <h3>Pastoreo con manejo (PV6)</h3>
-        <div style="font-size:12px;color:#6b7a8c" id="pv6-m2-status">—</div>
-      </div>
-      <div class="table-wrap" style="max-height:38vh;overflow:auto">
-        <table class="rank">
-          <thead><tr>
-            <th>Potrero</th><th>Kg MS/ha</th><th>Días br.</th><th>Días FDN</th><th>Δ desperd. (d)</th><th>Días aj.</th><th>Estado</th>
-          </tr></thead>
-          <tbody id="pv6-m2-body"></tbody>
-        </table>
-      </div>
-    `;
-    side.prepend(card);
   }
 
   function refreshUI(ctx){
@@ -134,7 +132,6 @@
     started = true;
 
     const S = window.state;
-    const side = document.querySelector('aside');
     const ctx = {
       S,
       AREAS: window.AREAS || new Map(),
@@ -144,10 +141,9 @@
       selectedParents: window.selectedParents || (()=>[]),
     };
 
-    buildUI(side);
+    buildUI();
     refreshUI(ctx);
 
-    // re-render on controls
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
       const el=document.getElementById(id);
       if (!el) return;
@@ -156,9 +152,6 @@
     });
   }
 
-  // wait until app is ready
-  const iv = setInterval(()=>{
-    try{ attach(); if (started) clearInterval(iv);}catch(_){}
-  }, 200);
-  setTimeout(()=>{ clearInterval(iv); try{ attach(); }catch(_){} }, 8000);
+  const iv = setInterval(()=>{ try{ attach(); if (started) clearInterval(iv);}catch(_){}} , 250);
+  setTimeout(()=>{ clearInterval(iv); try{ attach(); }catch(_){} }, 9000);
 })();
