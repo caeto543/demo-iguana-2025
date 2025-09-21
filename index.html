@@ -239,16 +239,16 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (inline, auto-scroll + observer para Ranking) -->
+<!-- Addon manejo PV6 (inline, leyendo CHIPS: Ocupados / Libres calificados) -->
 <script>
 (function(){
   function ensurePanel(){
-    let card = document.getElementById('pv6-manejo-floating');
-    if (card) return card;
-    card = document.createElement('section');
-    card.id = 'pv6-manejo-floating';
-    card.style.cssText = 'position:fixed; right:12px; bottom:12px; width:560px; max-height:60vh; overflow:auto; background:#fff; border:1px solid #e5e7eb; box-shadow:0 10px 25px rgba(0,0,0,.12); border-radius:16px; z-index:9999; font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
-    card.innerHTML = `
+    let card=document.getElementById('pv6-manejo-floating');
+    if(card) return card;
+    card=document.createElement('section');
+    card.id='pv6-manejo-floating';
+    card.style.cssText='position:fixed;right:12px;bottom:12px;width:560px;max-height:60vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 10px 25px rgba(0,0,0,.12);border-radius:16px;z-index:9999;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+    card.innerHTML=`
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3">
         <h3 style="margin:0;font-size:16px">Pastoreo con manejo (PV6)</h3>
         <div id="pv6-m2-status" style="font-size:12px;color:#6b7a8c">inicializando…</div>
@@ -265,7 +265,7 @@
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días aj.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Estado</th>
             </tr></thead>
-            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Buscando “Ranking de potreros (Pastoreo)”…</td></tr></tbody>
+            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Leyendo chips…</td></tr></tbody>
           </table>
         </div>
       </div>`;
@@ -273,73 +273,67 @@
     return card;
   }
 
-  function fmt(n){ return (n==null||!isFinite(n)) ? '–' : (Math.round(n*10)/10).toLocaleString('es-CO'); }
-  function daysFDN(f){ if (f==null||!isFinite(f)||f<=0) return null; const pct=(f<=1)?f*100:f; return 120/pct; }
+  function fmt(n){return(n==null||!isFinite(n))?'–':(Math.round(n*10)/10).toLocaleString('es-CO');}
+  function daysFDN(f){if(f==null||!isFinite(f)||f<=0)return null;const pct=(f<=1)?f*100:f;return 120/pct;}
 
-  function findRankingHeader(){
-    const match=/ranking\s+de\s+potreros/i;
-    const nodes=[...document.querySelectorAll('h1,h2,h3,h4,.card-header,.card-title,[class*="heading"],[data-title]')];
-    return nodes.find(el=>match.test((el.textContent||'').trim()))||null;
-  }
-  function findRankingContainer(){
-    const hdr=findRankingHeader();
-    if (hdr){
-      const cont = hdr.closest('section, .card, .widget, .panel, div') || hdr.parentElement;
-      if (cont) return cont;
-    }
-    // Fallback por cabeceras
-    const tables=[...document.querySelectorAll('table')];
-    for (const t of tables){
-      const ths=[...t.querySelectorAll('thead th, thead td, tbody tr:first-child th, tbody tr:first-child td')].map(x=>(x.textContent||'').trim().toLowerCase());
-      const ok = ths.some(x=>/potrero/.test(x)) && ths.some(x=>/kg\s*ms\/?ha|kgms\/?ha/i.test(x)) && ths.some(x=>/fnd/.test(x));
-      if (ok) return t.closest('section, .card, .widget, .panel, div')||t.parentElement;
-    }
-    return null;
-  }
-  function readRanking(container){
-    const table = container.querySelector('table') || container;
-    const rows=[];
-    [...table.querySelectorAll('tbody tr')].forEach(tr=>{
-      const tds=tr.querySelectorAll('td,th'); if (tds.length<3) return;
-      const nm=(tds[0].textContent||'').trim();
-      const getNum=t=>t.replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
-      const txts=[...tds].map(td=>(td.textContent||'').trim());
-      const kg = txts[1] ? parseFloat(getNum(txts[1])) : null;
-      let fndStr = txts[3]||'';
-      if(!/%/.test(fndStr)) fndStr = (txts.find(x=>/%/.test(x))||'');
-      const fnd = fndStr ? parseFloat(getNum(fndStr)) : null;
-      if (nm) rows.push({nm,kg,fnd});
+  // Busca las secciones por su título y toma todos los "chips" (badges) con nombre + número
+  function readChips(){
+    const out=[];
+    // localizar contenedores por títulos “Ocupados” y “Libres calificados”
+    const pick = (labelRegex)=>{
+      const nodes=[...document.querySelectorAll('h1,h2,h3,h4,div,span')];
+      const hdr=nodes.find(el=>labelRegex.test((el.textContent||'').trim()));
+      return hdr ? (hdr.closest('section,div,article')||hdr.parentElement) : null;
+    };
+    const c1=pick(/^\s*Ocupados/i);
+    const c2=pick(/^\s*Libres\s+calificados/i);
+
+    [c1,c2].filter(Boolean).forEach(c=>{
+      // dentro de cada contenedor, tomar elementos tipo chip (buttons / a / spans)
+      const els=[...c.querySelectorAll('button,a,span,div')];
+      els.forEach(el=>{
+        const txt=(el.textContent||'').trim().replace(/\s+/g,' ');
+        // patrón: "PV3 △ 2.246"  ó  "G15 2.220"
+        const m=txt.match(/^([A-Z]+[0-9A-Z]*)[^\d-]*([\d.,]{3,})$/i);
+        if(!m) return;
+        const nm=m[1].trim();
+        const kg=parseFloat(m[2].replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',','.'));
+        if(nm && isFinite(kg)) out.push({nm,kg});
+      });
     });
-    return rows;
+    // ordenar por Kg desc. y quitar duplicados por nombre
+    const seen=new Set();
+    const uniq=[];
+    out.sort((a,b)=>b.kg-a.kg).forEach(r=>{if(!seen.has(r.nm)){seen.add(r.nm);uniq.push(r)}});
+    return uniq;
   }
 
-  function renderFromRanking(){
+  function renderFromChips(){
     const status=document.getElementById('pv6-m2-status');
     const body=document.getElementById('pv6-m2-body');
-    if (!status||!body) return false;
+    if(!status||!body) return false;
 
-    const cont=findRankingContainer();
-    if (!cont){ status.textContent='buscando ranking…'; return false; }
+    const rows=readChips();
+    if(!rows.length){ status.textContent='leyendo chips…'; return false; }
 
-    const table=cont.querySelector('table')||cont;
-    const rows=readRanking(cont);
-    if (!rows.length){
-      status.textContent='ranking encontrado, esperando filas…';
-      return false;
-    }
+    // FND desde mapa global si existe
+    const FND = (window.FND instanceof Map) ? window.FND : new Map();
 
-    status.textContent='[M2.17] listo — fuente: ranking (DOM)';
+    status.textContent='[M2.17] listo — fuente: chips + FND';
     body.innerHTML='';
     rows.slice(0,30).forEach(r=>{
-      const Dfdn=daysFDN(r.fnd);
-      const beta=0.05, wmax=0.30;
-      const delta=(Dfdn==null)?null:Math.min(wmax,beta*Dfdn);
-      const Dbr=null; // sin UA/área aquí
-      const Daj=(Dfdn==null)?null:Math.max(0,Dfdn-(delta||0));
-      const estadoTxt=(r.kg==null)?'–':(r.kg>=2000&&r.kg<=3200)?'<span class="state green">Verde</span>':(r.kg>=1600)?'<span class="state yellow">Amarillo</span>':'<span class="state red">Rojo</span>';
+      const fnd = FND.has(r.nm) ? FND.get(r.nm) : null; // % o [0–1]
+      const Dfdn = daysFDN(fnd);
+      const beta = 0.05, wmax = 0.30;
+      const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
+      const Dbr = null; // sin UA/área aquí
+      const Daj = (Dfdn==null) ? null : Math.max(0, Dfdn - (delta||0));
+      const estadoTxt = (r.kg>=2000 && r.kg<=3200) ? '<span class="state green">Verde</span>'
+                       : (r.kg>=1600) ? '<span class="state yellow">Amarillo</span>'
+                       : '<span class="state red">Rojo</span>';
       const tr=document.createElement('tr');
-      tr.innerHTML=`<td style="text-align:left;padding:6px 4px">${r.nm}</td>
-        <td style="padding:6px 4px">${r.kg==null?'–':Math.round(r.kg).toLocaleString('es-CO')}</td>
+      tr.innerHTML = `<td style="text-align:left;padding:6px 4px">${r.nm}</td>
+        <td style="padding:6px 4px">${Math.round(r.kg).toLocaleString('es-CO')}</td>
         <td style="padding:6px 4px">${fmt(Dbr)}</td>
         <td style="padding:6px 4px">${fmt(Dfdn)}</td>
         <td style="padding:6px 4px">${fmt(delta)}</td>
@@ -350,37 +344,22 @@
     return true;
   }
 
-  function ensureVisibleAndObserve(){
-    const hdr=findRankingHeader();
-    if (hdr) { try{ hdr.scrollIntoView({behavior:'smooth', block:'center'}); }catch(_){ window.scrollBy(0,500); } }
-    const cont=findRankingContainer();
-    if (!cont) return null;
-
-    // Observa aparición de filas en la tabla
-    const table=cont.querySelector('table')||cont;
-    const target=table.querySelector('tbody')||table;
-    const mo=new MutationObserver(()=>renderFromRanking());
-    mo.observe(target,{childList:true,subtree:true});
-    return mo;
-  }
-
   function start(){
     ensurePanel();
-    const mo=ensureVisibleAndObserve();
-    // reintenta hasta llenar
-    const iv=setInterval(()=>{ if (renderFromRanking()) clearInterval(iv); }, 400);
-    setTimeout(()=>clearInterval(iv), 15000);
-    // recalcular en cambios de controles
+    // reintenta hasta llenar (los chips ya están visibles)
+    const iv=setInterval(()=>{ if(renderFromChips()) clearInterval(iv); }, 300);
+    setTimeout(()=>clearInterval(iv), 10000);
+    // recalcular si cambias filtros/controles
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
       const el=document.getElementById(id); if(!el) return;
       const ev=(id==='btn-apply')?'click':'change';
-      el.addEventListener(ev, ()=>{ ensureVisibleAndObserve(); renderFromRanking(); });
+      el.addEventListener(ev, ()=>renderFromChips());
     });
-    // también al hacer scroll (por si el ranking está fuera de vista)
-    window.addEventListener('scroll', ()=>renderFromRanking(), {passive:true});
+    // por si la UI re-renderiza chips al hacer scroll/cambios
+    window.addEventListener('scroll', ()=>renderFromChips(), {passive:true});
   }
 
-  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', start);
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();
 </script>
