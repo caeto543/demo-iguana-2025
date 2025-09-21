@@ -239,22 +239,21 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (chips + CSV AREAS/FND + UA editable) -->
+<!-- Addon manejo PV6 (cálculo completo: Dbr, Dfdn, Δ, Daj) -->
 <script>
 (function(){
-  // ------- UI flotante -------
   function ensurePanel(){
     let card=document.getElementById('pv6-manejo-floating');
     if(card) return card;
     card=document.createElement('section');
     card.id='pv6-manejo-floating';
-    card.style.cssText='position:fixed;right:12px;bottom:12px;width:620px;max-height:66vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 10px 25px rgba(0,0,0,.12);border-radius:16px;z-index:9999;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
+    card.style.cssText='position:fixed;right:12px;bottom:12px;width:640px;max-height:66vh;overflow:auto;background:#fff;border:1px solid #e5e7eb;box-shadow:0 10px 25px rgba(0,0,0,.12);border-radius:16px;z-index:9999;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;';
     card.innerHTML=`
       <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eceff3;gap:12px">
         <h3 style="margin:0;font-size:16px">Pastoreo con manejo (PV6)</h3>
         <div style="display:flex;align-items:center;gap:8px;font-size:12px">
           <label>UA</label>
-          <input id="pv6-ua" type="number" step="1" min="0" style="width:80px;padding:4px 6px;border:1px solid #d1d5db;border-radius:8px" />
+          <input id="pv6-ua" type="number" step="1" min="0" style="width:90px;padding:4px 6px;border:1px solid #d1d5db;border-radius:8px" />
           <button id="pv6-recalc" style="padding:4px 8px;border:1px solid #d1d5db;background:#f8fafc;border-radius:8px;cursor:pointer">Recalcular</button>
           <span id="pv6-m2-status" style="color:#6b7a8c"></span>
         </div>
@@ -272,135 +271,137 @@
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días aj.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Estado</th>
             </tr></thead>
-            <tbody id="pv6-m2-body"><tr><td colspan="8" style="padding:8px 4px;color:#6b7a8c">Cargando AREAS/FND…</td></tr></tbody>
+            <tbody id="pv6-m2-body"><tr><td colspan="8" style="padding:8px 4px;color:#6b7a8c">Cargando…</td></tr></tbody>
           </table>
         </div>
       </div>`;
     document.body.appendChild(card);
-    // acciones
-    const btn=document.getElementById('pv6-recalc'); btn.addEventListener('click', ()=>render());
+    document.getElementById('pv6-recalc').addEventListener('click', ()=>render());
     return card;
   }
 
-  // ------- utilidades -------
-  const getNum = t => (t||'').toString().replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
-  function fmt(n){return(n==null||!isFinite(n))?'–':(Math.round(n*10)/10).toLocaleString('es-CO');}
-  function daysFDN(f){if(f==null||!isFinite(f)||f<=0)return null;const pct=(f<=1)?f*100:f;return 120/pct;}
+  // Utils
+  const num = t => (t||'').toString().replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
+  const fmt = n => (n==null||!isFinite(n)) ? '–' : (Math.round(n*10)/10).toLocaleString('es-CO');
+  function daysFDN(f){ if(f==null||!isFinite(f)||f<=0) return null; const pct=(f<=1)?f*100:f; return 120/pct; }
+
   function readControls(){
     const coefEl=document.querySelector('#coef-uso, [name="coef-uso"], input[placeholder*="coef"]');
     const consEl=document.querySelector('#consumo, [name="consumo"], input[placeholder*="consumo"]');
-    const coef = coefEl? parseFloat(getNum(coefEl.value||coefEl.textContent)) : 60;
-    const base = consEl? parseFloat(getNum(consEl.value||consEl.textContent)) : 10;
-    return { coefUso: isFinite(coef)? coef : 60, base: isFinite(base)? base : 10 };
+    const coef = coefEl ? parseFloat(num(coefEl.value||coefEl.textContent)) : 60;
+    const base = consEl ? parseFloat(num(consEl.value||consEl.textContent)) : 10;
+    return { coefUso: isFinite(coef)?coef:60, base: isFinite(base)?base:10 };
   }
+
   function autollenarUA(){
     const uaInput=document.getElementById('pv6-ua');
-    if (!uaInput || uaInput.value) return;
-    // UA ≈ (Demanda diaria (Finca)) / base
+    if(!uaInput || uaInput.value) return;
     const demNode=[...document.querySelectorAll('div,section,span,strong,h3')].find(el=>/Demanda\s+diaria\s*\(Finca\)/i.test(el.textContent||''));
     const {base}=readControls();
     if(demNode){
-      const num=(demNode.parentElement||demNode).querySelector('div,span,strong');
-      const dem=num? parseFloat(getNum(num.textContent)) : null;
+      const numEl=(demNode.parentElement||demNode).querySelector('div,span,strong');
+      const dem=numEl? parseFloat(num(numEl.textContent)) : null;
       if(isFinite(dem) && base>0) uaInput.value = Math.round(dem/base);
     }
   }
 
-  // ------- lectura de chips -------
+  // Lee chips Ocupados/Libres
   function readChips(){
     const out=[];
-    const pick = re => {
+    const pick=re=>{
       const nodes=[...document.querySelectorAll('h1,h2,h3,h4,div,span')];
       const hdr=nodes.find(el=>re.test((el.textContent||'').trim()));
-      return hdr? (hdr.closest('section,div,article')||hdr.parentElement):null;
+      return hdr ? (hdr.closest('section,div,article')||hdr.parentElement) : null;
     };
     const c1=pick(/^\s*Ocupados/i), c2=pick(/^\s*Libres\s+calificados/i);
     [c1,c2].filter(Boolean).forEach(c=>{
-      const els=[...c.querySelectorAll('button,a,span,div')];
-      els.forEach(el=>{
-        const txt=(el.textContent||'').trim().replace(/\s+/g,' ');
-        const m=txt.match(/^([A-Z]+[0-9A-Z]*)[^\d-]*([\d.,]{3,})$/i);
+      [...c.querySelectorAll('button,a,span,div')].forEach(el=>{
+        const tx=(el.textContent||'').trim().replace(/\s+/g,' ');
+        const m=tx.match(/^([A-Z]+[0-9A-Z]*)[^\d-]*([\d.,]{3,})$/i);
         if(!m) return;
         const nm=m[1].trim();
-        const kg=parseFloat(getNum(m[2]));
+        const kg=parseFloat(num(m[2]));
         if(nm && isFinite(kg)) out.push({nm,kg});
       });
     });
     const seen=new Set(), uniq=[];
-    out.sort((a,b)=>b.kg-a.kg).forEach(r=>{ if(!seen.has(r.nm)){ seen.add(r.nm); uniq.push(r);} });
+    out.sort((a,b)=>b.kg-a.kg).forEach(r=>{ if(!seen.has(r.nm)){ seen.add(r.nm); uniq.push(r); }});
     return uniq;
   }
 
-  // ------- carga CSVs (AREAS, FND) -------
+  // Carga AREAS / FND
   const AREAS=new Map(), FND=new Map();
-  async function loadCSVtoMaps(){
-    try{
-      const [areasTxt,fndTxt] = await Promise.all([
-        fetch('Nombres_area_iguana.csv').then(r=>r.text()),
-        fetch('Iguana_FND_por_potrero.csv').then(r=>r.text())
-      ]);
-      // áreas: busca nombre & área numérica
-      areasTxt.split(/\r?\n/).forEach(line=>{
-        const cols=line.split(',');
-        if(cols.length<2) return;
-        const nm=(cols[0]||'').trim();
-        const ha=parseFloat(getNum(cols[1]||cols[cols.length-1]||''));
-        if(nm && isFinite(ha)) AREAS.set(nm,ha);
-      });
-      // FND: potrero, fnd(%)
-      fndTxt.split(/\r?\n/).forEach(line=>{
-        const cols=line.split(',');
-        if(cols.length<2) return;
-        const nm=(cols[0]||'').trim();
-        const f=parseFloat(getNum(cols[1]||cols[cols.length-1]||''));
-        if(nm && isFinite(f)) FND.set(nm,f); // porcentaje (0–100)
-      });
-    }catch(e){/* silencioso */}
+  async function loadCSV(){
+    const [areasTxt,fndTxt]=await Promise.all([
+      fetch('Nombres_area_iguana.csv').then(r=>r.text()).catch(()=>''), 
+      fetch('Iguana_FND_por_potrero.csv').then(r=>r.text()).catch(()=>'')
+    ]);
+
+    const norm=s=>s.trim().toUpperCase().replace(/\s+/g,'_');
+    areasTxt.split(/\r?\n/).forEach(line=>{
+      const cols=line.split(',');
+      if(cols.length<2) return;
+      const nm=norm(cols[0]||'');
+      const ha=parseFloat(num(cols[1]||cols[cols.length-1]||''));
+      if(nm && isFinite(ha)) AREAS.set(nm,ha);
+    });
+    fndTxt.split(/\r?\n/).forEach(line=>{
+      const cols=line.split(',');
+      if(cols.length<2) return;
+      const nm=norm(cols[0]||'');
+      const f =parseFloat(num(cols[1]||cols[cols.length-1]||'')); // asumimos 0–100
+      if(nm && isFinite(f)) FND.set(nm,f);
+    });
   }
 
-  // ------- render -------
   function render(){
     const status=document.getElementById('pv6-m2-status');
     const body=document.getElementById('pv6-m2-body');
     if(!status||!body) return false;
 
     const rows=readChips();
-    const uaInput=document.getElementById('pv6-ua');
-    const UA = uaInput && uaInput.value ? parseFloat(uaInput.value) : null;
+    const uaEl=document.getElementById('pv6-ua');
+    const UA = uaEl && uaEl.value ? parseFloat(uaEl.value) : null;
     const {coefUso, base} = readControls();
     const uso=(coefUso||0)/100;
+    const norm=s=>s.trim().toUpperCase().replace(/\s+/g,'_');
 
-    status.textContent = `[M2.17] listo — fuente: chips + CSV — UA:${UA??'–'} coef:${coefUso}% base:${base}`;
+    status.textContent = `[M2.17] listo — fuente: chips+CSV — AREAS:${AREAS.size} FND:${FND.size} — UA:${UA??'–'} coef:${coefUso}% base:${base}`;
     body.innerHTML='';
 
+    const beta=0.05, wmax=0.30;
+
     rows.slice(0,40).forEach(r=>{
-      const ha = AREAS.get(r.nm);
-      const oferta = (isFinite(r.kg)&&isFinite(ha)) ? (r.kg*ha*uso) : null; // kg disponibles
+      const key=norm(r.nm);
+      const ha  = AREAS.get(key);
+      const fnd = FND.get(key);
+
+      const oferta = (isFinite(r.kg)&&isFinite(ha)) ? (r.kg*ha*uso) : null;  // kg tot
       const demanda = (UA!=null && isFinite(UA)) ? (UA*base) : null;        // kg/día
       const Dbr = (oferta!=null && demanda!=null && demanda>0)? (oferta/demanda) : null;
 
-      const fnd = FND.get(r.nm);
       const Dfdn = daysFDN(fnd);
-      const beta=0.05, wmax=0.30;
-      const delta=(Dfdn==null)?null:Math.min(wmax,beta*Dfdn);
+      const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
       const Daj = (Dbr==null && Dfdn==null) ? null
                 : (Dbr==null) ? Math.max(0,(Dfdn||0)-(delta||0))
                 : (Dfdn==null) ? Dbr
                 : Math.max(Dbr, Dfdn - (delta||0));
 
-      const estadoTxt=(r.kg>=2000&&r.kg<=3200)?'<span class="state green">Verde</span>' :
-                      (r.kg>=1600)?'<span class="state yellow">Amarillo</span>' :
-                      '<span class="state red">Rojo</span>';
+      const estado = (r.kg>=2000&&r.kg<=3200) ? 'Verde' : (r.kg>=1600) ? 'Amarillo' : 'Rojo';
+      const pill = estado==='Verde' ? 'background:#22c55e1a;color:#16a34a;border:1px solid #22c55e33;padding:2px 8px;border-radius:9999px'
+                 : estado==='Amarillo' ? 'background:#f59e0b1a;color:#d97706;border:1px solid #f59e0b33;padding:2px 8px;border-radius:9999px'
+                 : 'background:#ef44441a;color:#dc2626;border:1px solid #ef444433;padding:2px 8px;border-radius:9999px';
 
       const tr=document.createElement('tr');
-      tr.innerHTML=`<td style="text-align:left;padding:6px 4px">${r.nm}</td>
+      tr.innerHTML=`
+        <td style="text-align:left;padding:6px 4px">${r.nm}</td>
         <td style="padding:6px 4px">${Math.round(r.kg).toLocaleString('es-CO')}</td>
         <td style="padding:6px 4px">${isFinite(ha)? fmt(ha):'–'}</td>
         <td style="padding:6px 4px">${fmt(Dbr)}</td>
         <td style="padding:6px 4px">${fmt(Dfdn)}</td>
         <td style="padding:6px 4px">${fmt(delta)}</td>
         <td style="padding:6px 4px">${fmt(Daj)}</td>
-        <td style="padding:6px 4px">${estadoTxt}</td>`;
+        <td style="padding:6px 4px"><span style="${pill}">${estado}</span></td>`;
       body.appendChild(tr);
     });
     return true;
@@ -409,20 +410,17 @@
   async function start(){
     ensurePanel();
     autollenarUA();
-    await loadCSVtoMaps();        // carga AREAS & FND desde el repo
+    await loadCSV();                  // carga AREAS+FND
     const iv=setInterval(()=>{ if(render()) clearInterval(iv); }, 300);
     setTimeout(()=>clearInterval(iv), 12000);
-
-    // recalcular al cambiar controles y UA
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply','pv6-ua'].forEach(id=>{
       const el=(id==='pv6-ua')? document.getElementById(id) : document.getElementById(id);
       if(!el) return;
-      const ev = (id==='btn-apply')?'click':'change';
+      const ev=(id==='btn-apply')?'click':'change';
       el.addEventListener(ev, ()=>render());
     });
     window.addEventListener('scroll', ()=>render(), {passive:true});
   }
-
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();
