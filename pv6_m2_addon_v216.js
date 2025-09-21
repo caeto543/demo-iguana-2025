@@ -1,36 +1,40 @@
-// PV6 Manejo — M2.17 (FIXED, fresh link)
+// PV6 Manejo — M2.17 (ROBUST WAIT)
 (function(){
-  if (typeof window === 'undefined' || typeof window.state === 'undefined') return;
+  let started = false;
 
-  const S = window.state;
+  function ready(){
+    return (typeof window !== 'undefined')
+        && window.state
+        && document.querySelector('aside')
+        && document.body;
+  }
 
-  // helpers
-  const parseDate = window.parseDate || (s => new Date(s+'T00:00:00'));
-  const selectedParents = window.selectedParents || (()=>[]);
-  const AREAS = window.AREAS || new Map();
-  const FND = window.FND || new Map();
-  const moves = window.moves || new Map();
-  const kgFor = window.kgFor || ((nm,ds)=>null);
-  const lastOnOrBefore = window.lastOnOrBefore || function(arr, d, key){
-    if (!arr) return null; for (let i=arr.length-1;i>=0;i--){ const di=parseDate(arr[i].date); if (di<=d && arr[i][key]!=null) return arr[i][key]; } return null;
+  function parseDate(s){ try{ return new Date(s+'T00:00:00'); }catch(_){ return new Date(); } }
+  const lastOnOrBefore = function(arr, d, key){
+    if (!arr) return null;
+    for (let i=arr.length-1;i>=0;i--){
+      const di = parseDate(arr[i].date || arr[i].fecha || arr[i].d);
+      if (di<=d && arr[i][key]!=null) return arr[i][key];
+    }
+    return null;
   };
 
-  function lastDateAvailable(){
+  function lastDateAvailable(S){
     if (S.end) return S.end;
     try{
       const series = window.series || new Map();
-      for (const [nm,arr] of series){
+      for (const [,arr] of series){
         for (let i=arr.length-1;i>=0;i--){
           const d = arr[i].date || arr[i].fecha || arr[i].d || null;
           if (d) return d;
         }
       }
     }catch(_){}
-    const t = new Date(); const m=String(t.getMonth()+1).padStart(2,'0'), d=String(t.getDate()).padStart(2,'0');
+    const t=new Date(); const m=String(t.getMonth()+1).padStart(2,'0'), d=String(t.getDate()).padStart(2,'0');
     return `${t.getFullYear()}-${m}-${d}`;
   }
 
-  function getUA(nm, dEnd){
+  function getUA(nm, dEnd, moves){
     const m = moves.get(nm) || [];
     let ua = lastOnOrBefore(m, dEnd, 'UA') ?? lastOnOrBefore(m, dEnd, 'UA_ef') ?? lastOnOrBefore(m, dEnd, 'UA_efectiva');
     if (ua==null){
@@ -40,27 +44,19 @@
     return ua || 0;
   }
 
-  function isOccupied(nm, dEnd){
-    const m = moves.get(nm) || [];
-    const occ = lastOnOrBefore(m, dEnd, 'occ');
-    if (occ!=null) return !!occ;
-    const ua = getUA(nm, dEnd);
-    const N  = lastOnOrBefore(m, dEnd, 'N') ?? lastOnOrBefore(m, dEnd, 'N_total') ?? 0;
-    return (ua>0 || N>0);
-  }
-
   function daysFDN(f){
     if (f==null || !isFinite(f) || f<=0) return null;
     const pct = (f<=1) ? (f*100) : f; // acepta 0–1 o %
     return 120 / pct;
   }
 
-  function calcRow(nm, ds){
+  function calcRow(nm, ds, ctx){
+    const {AREAS, FND, moves, kgFor, S} = ctx;
     const dEnd = parseDate(ds);
     const area = AREAS.get(nm)||0;
     const kg   = kgFor(nm, ds);
     const fnd  = FND.has(nm)? FND.get(nm): null;
-    const UA   = getUA(nm, dEnd);
+    const UA   = getUA(nm, dEnd, moves);
     const uso  = (S.coefUso ?? 60) / 100;
     const base = S.consumo ?? 10;
     const oferta  = (kg||0) * area * uso;
@@ -81,9 +77,7 @@
     return { nm, kg, Dbr, Dfdn, delta, Daj, estado };
   }
 
-  function buildUI(){
-    const side = document.querySelector('aside.side');
-    if (!side) return;
+  function buildUI(side){
     let card = document.getElementById('pv6-manejo-card');
     if (!card){
       card = document.createElement('section');
@@ -104,22 +98,23 @@
         </table>
       </div>
     `;
-    side.prepend(card); // arriba del panel derecho
+    side.prepend(card);
   }
 
-  function refreshUI(){
-    const ds = S.end || lastDateAvailable();
+  function refreshUI(ctx){
+    const {S, selectedParents, kgFor} = ctx;
+    const ds = S.end || lastDateAvailable(S);
     const fuente = (S.fuente==='raw')? 'kgms_raw':'kgms_7d';
     const statusEl = document.getElementById('pv6-m2-status');
     if (statusEl) statusEl.textContent = `[M2.17] listo — fuente: ${fuente} hasta: ${ds}`;
 
     const body = document.getElementById('pv6-m2-body');
     if (!body) return;
-    const padres = selectedParents().filter(n=>!n.startsWith('z'));
+    const padres = selectedParents().filter(n=>!n.toLowerCase().startsWith('z'));
     const rows = padres.map(nm=>({nm, kg: kgFor(nm, ds)||0})).sort((a,b)=>b.kg-a.kg);
     body.innerHTML='';
     rows.forEach(r=>{
-      const x = calcRow(r.nm, ds);
+      const x = calcRow(r.nm, ds, ctx);
       const fmt = n => (n==null || !isFinite(n))? '–' : (Math.round(n*10)/10).toLocaleString('es-CO');
       const estadoTxt = x.estado===1 ? '<span class="state green">Verde</span>' : x.estado===0 ? '<span class="state yellow">Amarillo</span>' : '<span class="state red">Rojo</span>';
       const tr = document.createElement('tr');
@@ -135,15 +130,35 @@
   }
 
   function attach(){
-    buildUI();
-    refreshUI();
+    if (started || !ready()) return;
+    started = true;
+
+    const S = window.state;
+    const side = document.querySelector('aside');
+    const ctx = {
+      S,
+      AREAS: window.AREAS || new Map(),
+      FND: window.FND || new Map(),
+      moves: window.moves || new Map(),
+      kgFor: window.kgFor || ((nm,ds)=>null),
+      selectedParents: window.selectedParents || (()=>[]),
+    };
+
+    buildUI(side);
+    refreshUI(ctx);
+
+    // re-render on controls
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
       const el=document.getElementById(id);
       if (!el) return;
-      if (id==='btn-apply') el.addEventListener('click', refreshUI);
-      else el.addEventListener('change', refreshUI);
+      if (id==='btn-apply') el.addEventListener('click', ()=>refreshUI(ctx));
+      else el.addEventListener('change', ()=>refreshUI(ctx));
     });
   }
 
-  if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', attach); else attach();
+  // wait until app is ready
+  const iv = setInterval(()=>{
+    try{ attach(); if (started) clearInterval(iv);}catch(_){}
+  }, 200);
+  setTimeout(()=>{ clearInterval(iv); try{ attach(); }catch(_){} }, 8000);
 })();
