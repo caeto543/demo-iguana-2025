@@ -239,10 +239,9 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (inline, mínimo — debe verse SIEMPRE un panel flotante) -->
+<!-- Addon manejo PV6 (inline, con puente DOM → Ranking de potreros) -->
 <script>
 (function(){
-  // crea el panel flotante de inmediato, sin depender de nada
   function ensurePanel(){
     let card = document.getElementById('pv6-manejo-floating');
     if (card) return card;
@@ -277,55 +276,57 @@
   function fmt(n){ return (n==null||!isFinite(n)) ? '–' : (Math.round(n*10)/10).toLocaleString('es-CO'); }
   function daysFDN(f){ if (f==null||!isFinite(f)||f<=0) return null; const pct=(f<=1)?f*100:f; return 120/pct; }
 
-  function tryRender(){
-    const S = window.state || {};
+  // Lee la tabla "Ranking de potreros (Pastoreo)" del panel derecho → [{nm, kg, fnd}]
+  function readRankingDOM(){
+    const result = [];
+    // busca tarjetas/títulos que contengan "Ranking de potreros"
+    const all = Array.from(document.querySelectorAll('h3, h4, .card-header, .card-title, .widget-title, [class*="heading"]'));
+    const hdr = all.find(el => /ranking\s+de\s+potreros/i.test(el.textContent||''));
+    if (!hdr) return result;
+    // tabla asociada (sube al contenedor y busca <table>)
+    const wrap = hdr.closest('section, .card, .widget, div') || document;
+    const table = wrap.querySelector('table');
+    if (!table) return result;
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    rows.forEach(tr=>{
+      const tds = tr.querySelectorAll('td,th');
+      if (tds.length < 3) return;
+      const nm = (tds[0].textContent||'').trim();
+      // 2da col: Kg MS/ha; 4ta (o 3ra/4ta según tu tabla) suele mostrar FND (“77%”, “–”)
+      const kgTxt  = (tds[1].textContent||'').replace(/[^\d.,-]/g,'').replace('.','').replace(',','.');
+      const fndTxt = (tds[3] ? tds[3].textContent : '').replace(/[^\d.,-]/g,'').replace('.','').replace(',','.');
+      const kg  = kgTxt ? parseFloat(kgTxt)  : null;
+      const fnd = fndTxt ? parseFloat(fndTxt) : null; // en % si existe
+      if (nm) result.push({ nm, kg, fnd });
+    });
+    return result;
+  }
+
+  function renderFromRanking(){
     const status = document.getElementById('pv6-m2-status');
     const body = document.getElementById('pv6-m2-body');
-    if (!status || !body) return;
+    if (!status || !body) return false;
 
-    // intenta “enganchar” a las estructuras si existen
-    const AREAS = window.AREAS instanceof Map ? window.AREAS : new Map();
-    const FND   = window.FND   instanceof Map ? window.FND   : new Map();
-    const moves = window.moves  instanceof Map ? window.moves : new Map();
-    const kgFor = typeof window.kgFor === 'function' ? window.kgFor : (()=>null);
-    const selectedParents = typeof window.selectedParents === 'function' ? window.selectedParents : (()=>[]);
-
-    // si aún no está todo listo, solo actualiza el estado y espera
-    if (selectedParents().length===0 || AREAS.size===0 || typeof kgFor!=='function') {
+    const rows = readRankingDOM();
+    if (!rows.length){
       status.textContent = 'esperando datos del app…';
       return false;
     }
 
-    const ds = S.end || (()=>{
-      const t=new Date(); const m=String(t.getMonth()+1).padStart(2,'0'), d=String(t.getDate()).padStart(2,'0');
-      return `${t.getFullYear()}-${m}-${d}`;
-    })();
-    const fuente = (S.fuente==='raw')? 'kgms_raw':'kgms_7d';
-    status.textContent = `[M2.17] listo — fuente: ${fuente} hasta: ${ds}`;
-
-    // arma filas simples (sin depender de layout)
-    const padres = selectedParents().filter(n=>!String(n).toLowerCase().startsWith('z'));
-    const rows = padres.map(nm=>({ nm, kg: kgFor(nm, ds)||0 })).sort((a,b)=>b.kg-a.kg).slice(0,25);
+    status.textContent = '[M2.17] listo — fuente: ranking (DOM)';
 
     body.innerHTML = '';
-    rows.forEach(r=>{
-      const area = AREAS.get(r.nm)||0;
-      const uso = (S.coefUso??60)/100;
-      const base= (S.consumo??10);
-      const oferta = (r.kg||0)*area*uso;
-      const UA = 0; // (UA real lo conectamos en el siguiente paso)
-      const demanda = UA*base;
-      const Dbr = (oferta>0 && demanda>0) ? (oferta/demanda) : null;
-
-      const fnd = FND.has(r.nm)? FND.get(r.nm): null;
-      const Dfdn = daysFDN(fnd);
-      const beta = S.params?.beta ?? 0.05, wmax = S.params?.wmax ?? 0.30;
+    rows.slice(0, 25).forEach(r=>{
+      // Con DOM no tenemos UA ni área → Días br. = –, usamos FDN para Días aj. con Δ = min(wmax, β*Dfdn)
+      const Dfdn = daysFDN(r.fnd);
+      const beta = 0.05, wmax = 0.30;
       const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
-      const Daj = (Dbr==null && Dfdn==null) ? null
-                : (Dbr==null) ? Math.max(0, (Dfdn||0) - (delta||0))
-                : (Dfdn==null) ? Dbr
-                : Math.max(Dbr, Dfdn - (delta||0));
-      const estadoTxt = r.kg>=2000 && r.kg<=3200 ? '<span class="state green">Verde</span>' : (r.kg>=1600 ? '<span class="state yellow">Amarillo</span>' : '<span class="state red">Rojo</span>');
+      const Dbr = null;
+      const Daj = (Dfdn==null) ? null : Math.max(0, Dfdn - (delta||0));
+      const estadoTxt = (r.kg==null) ? '–'
+        : (r.kg>=2000 && r.kg<=3200) ? '<span class="state green">Verde</span>'
+        : (r.kg>=1600) ? '<span class="state yellow">Amarillo</span>'
+        : '<span class="state red">Rojo</span>';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `<td style="text-align:left;padding:6px 4px">${r.nm}</td>
@@ -342,20 +343,17 @@
 
   function start(){
     ensurePanel();
-    // intenta renderizar cada 300 ms hasta lograrlo; luego escucha cambios básicos
-    const iv = setInterval(()=>{
-      const ok = tryRender();
-      if (ok){
-        clearInterval(iv);
-        ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
-          const el=document.getElementById(id);
-          if (!el) return;
-          const ev = (id==='btn-apply')?'click':'change';
-          el.addEventListener(ev, ()=>tryRender());
-        });
-      }
-    }, 300);
-    setTimeout(()=>clearInterval(iv), 10000);
+    // Reintenta llenar desde el DOM hasta que el ranking esté presente
+    const iv = setInterval(()=>{ if (renderFromRanking()) clearInterval(iv); }, 400);
+    setTimeout(()=>clearInterval(iv), 12000);
+
+    // Recalcular cuando el usuario cambie fuente/controles
+    ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
+      const el=document.getElementById(id);
+      if (!el) return;
+      const ev = (id==='btn-apply')?'click':'change';
+      el.addEventListener(ev, ()=>renderFromRanking());
+    });
   }
 
   if (document.readyState==='loading') document.addEventListener('DOMContentLoaded', start);
