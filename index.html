@@ -239,7 +239,7 @@
 <!-- Núcleo -->
 <script src="app.v6.js?v=V6"></script>
 
-<!-- Addon manejo PV6 (inline, leyendo CHIPS: Ocupados / Libres calificados) -->
+<!-- Addon manejo PV6 (chips + FND + UA/KPI + AREAS si existen) -->
 <script>
 (function(){
   function ensurePanel(){
@@ -265,7 +265,7 @@
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Días aj.</th>
               <th style="padding:6px 4px;border-bottom:1px solid #eee">Estado</th>
             </tr></thead>
-            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Leyendo chips…</td></tr></tbody>
+            <tbody id="pv6-m2-body"><tr><td colspan="7" style="padding:8px 4px;color:#6b7a8c">Panel cargado. Leyendo datos…</td></tr></tbody>
           </table>
         </div>
       </div>`;
@@ -273,42 +273,57 @@
     return card;
   }
 
+  const getNum = t => (t||'').toString().replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',', '.');
+
   function fmt(n){return(n==null||!isFinite(n))?'–':(Math.round(n*10)/10).toLocaleString('es-CO');}
   function daysFDN(f){if(f==null||!isFinite(f)||f<=0)return null;const pct=(f<=1)?f*100:f;return 120/pct;}
 
-  // Busca las secciones por su título y toma todos los "chips" (badges) con nombre + número
+  // Lee UA del KPI "UA efectiva (Potrero)"
+  function readUAFromKPI(){
+    const nodes=[...document.querySelectorAll('div,section,span,strong,h3')];
+    const box=nodes.find(el=>/UA\s+efectiva\s*\(Potrero\)/i.test(el.textContent||''));
+    if(!box) return null;
+    // busca un número dentro del mismo bloque
+    const num=(box.parentElement||box).querySelector('div,span,strong');
+    const v=num? parseFloat(getNum(num.textContent)) : null;
+    return isFinite(v)? v : null;
+  }
+
+  // Controles
+  function readControls(){
+    const coefEl=document.querySelector('#coef-uso, [name="coef-uso"], input[placeholder*="coef"]');
+    const consEl=document.querySelector('#consumo, [name="consumo"], input[placeholder*="consumo"]');
+    const coef = coefEl? parseFloat(getNum(coefEl.value||coefEl.textContent)) : 60;
+    const base = consEl? parseFloat(getNum(consEl.value||consEl.textContent)) : 10;
+    return { coefUso: isFinite(coef)? coef : 60, base: isFinite(base)? base : 10 };
+  }
+
+  // Chips Ocupados/Libres → [{nm, kg}]
   function readChips(){
     const out=[];
-    // localizar contenedores por títulos “Ocupados” y “Libres calificados”
-    const pick = (labelRegex)=>{
+    const pick = (re)=> {
       const nodes=[...document.querySelectorAll('h1,h2,h3,h4,div,span')];
-      const hdr=nodes.find(el=>labelRegex.test((el.textContent||'').trim()));
-      return hdr ? (hdr.closest('section,div,article')||hdr.parentElement) : null;
+      const hdr=nodes.find(el=>re.test((el.textContent||'').trim()));
+      return hdr? (hdr.closest('section,div,article')||hdr.parentElement):null;
     };
-    const c1=pick(/^\s*Ocupados/i);
-    const c2=pick(/^\s*Libres\s+calificados/i);
-
+    const c1=pick(/^\s*Ocupados/i), c2=pick(/^\s*Libres\s+calificados/i);
     [c1,c2].filter(Boolean).forEach(c=>{
-      // dentro de cada contenedor, tomar elementos tipo chip (buttons / a / spans)
       const els=[...c.querySelectorAll('button,a,span,div')];
       els.forEach(el=>{
         const txt=(el.textContent||'').trim().replace(/\s+/g,' ');
-        // patrón: "PV3 △ 2.246"  ó  "G15 2.220"
         const m=txt.match(/^([A-Z]+[0-9A-Z]*)[^\d-]*([\d.,]{3,})$/i);
         if(!m) return;
         const nm=m[1].trim();
-        const kg=parseFloat(m[2].replace(/[^\d.,-]/g,'').replace(/\.(?=\d{3}\b)/g,'').replace(',','.'));
+        const kg=parseFloat(getNum(m[2]));
         if(nm && isFinite(kg)) out.push({nm,kg});
       });
     });
-    // ordenar por Kg desc. y quitar duplicados por nombre
-    const seen=new Set();
-    const uniq=[];
-    out.sort((a,b)=>b.kg-a.kg).forEach(r=>{if(!seen.has(r.nm)){seen.add(r.nm);uniq.push(r)}});
+    const seen=new Set(), uniq=[];
+    out.sort((a,b)=>b.kg-a.kg).forEach(r=>{ if(!seen.has(r.nm)){ seen.add(r.nm); uniq.push(r);} });
     return uniq;
   }
 
-  function renderFromChips(){
+  function render(){
     const status=document.getElementById('pv6-m2-status');
     const body=document.getElementById('pv6-m2-body');
     if(!status||!body) return false;
@@ -316,21 +331,33 @@
     const rows=readChips();
     if(!rows.length){ status.textContent='leyendo chips…'; return false; }
 
-    // FND desde mapa global si existe
-    const FND = (window.FND instanceof Map) ? window.FND : new Map();
+    const FND = (window.FND instanceof Map)? window.FND : new Map();
+    const AREAS = (window.AREAS instanceof Map)? window.AREAS : new Map();
+    const UA = readUAFromKPI(); // puede ser null
+    const {coefUso, base} = readControls();
 
-    status.textContent='[M2.17] listo — fuente: chips + FND';
+    status.textContent = `[M2.17] listo — fuente: chips+FND — UA:${UA??'–'} coef:${coefUso}% base:${base}`;
+
     body.innerHTML='';
     rows.slice(0,30).forEach(r=>{
-      const fnd = FND.has(r.nm) ? FND.get(r.nm) : null; // % o [0–1]
+      const ha = AREAS.get(r.nm);       // puede ser undefined
+      const uso = (coefUso||0)/100;
+      const oferta = (isFinite(r.kg)&&isFinite(ha)) ? (r.kg*ha*uso) : null; // kg totales disponibles
+      const demanda = (UA!=null && isFinite(UA)) ? (UA*base) : null;        // kg/día
+      const Dbr = (oferta!=null && demanda!=null && demanda>0)? (oferta/demanda) : null;
+
+      const fnd = FND.has(r.nm)? FND.get(r.nm) : null;
       const Dfdn = daysFDN(fnd);
       const beta = 0.05, wmax = 0.30;
       const delta = (Dfdn==null)? null : Math.min(wmax, beta*Dfdn);
-      const Dbr = null; // sin UA/área aquí
-      const Daj = (Dfdn==null) ? null : Math.max(0, Dfdn - (delta||0));
+      const Daj = (Dbr==null && Dfdn==null) ? null
+                : (Dbr==null) ? Math.max(0,(Dfdn||0)-(delta||0))
+                : (Dfdn==null) ? Dbr
+                : Math.max(Dbr, Dfdn - (delta||0));
       const estadoTxt = (r.kg>=2000 && r.kg<=3200) ? '<span class="state green">Verde</span>'
                        : (r.kg>=1600) ? '<span class="state yellow">Amarillo</span>'
                        : '<span class="state red">Rojo</span>';
+
       const tr=document.createElement('tr');
       tr.innerHTML = `<td style="text-align:left;padding:6px 4px">${r.nm}</td>
         <td style="padding:6px 4px">${Math.round(r.kg).toLocaleString('es-CO')}</td>
@@ -346,17 +373,16 @@
 
   function start(){
     ensurePanel();
-    // reintenta hasta llenar (los chips ya están visibles)
-    const iv=setInterval(()=>{ if(renderFromChips()) clearInterval(iv); }, 300);
-    setTimeout(()=>clearInterval(iv), 10000);
-    // recalcular si cambias filtros/controles
+    const iv=setInterval(()=>{ if(render()) clearInterval(iv); }, 300);
+    setTimeout(()=>clearInterval(iv), 12000);
+
+    // recalcular al cambiar controles visibles
     ['date-end','fuente','coef-uso','consumo','mode','btn-apply'].forEach(id=>{
       const el=document.getElementById(id); if(!el) return;
       const ev=(id==='btn-apply')?'click':'change';
-      el.addEventListener(ev, ()=>renderFromChips());
+      el.addEventListener(ev, ()=>render());
     });
-    // por si la UI re-renderiza chips al hacer scroll/cambios
-    window.addEventListener('scroll', ()=>renderFromChips(), {passive:true});
+    window.addEventListener('scroll', ()=>render(), {passive:true});
   }
 
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', start);
